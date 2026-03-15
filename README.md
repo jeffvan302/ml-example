@@ -66,12 +66,34 @@ Notes:
 
 ## Files In This Folder
 
+- `demo_launcher.py`
 - `mnist_cnn_visualizer_gui.py`
 - `forager_raider_drl_gui.py`
 - `rocket_landing_drl_gui.py`
 - `ultralytics_yolo26_video_gui.py`
 - `requirements.txt`
 - `rocket.png`
+
+## Quick Launcher
+
+Script:
+
+```powershell
+python demo_launcher.py
+```
+
+What it does:
+
+- Opens a small launcher window with quick-launch buttons for the main GUI demos.
+- Uses the same Python interpreter and active Conda environment that started the launcher.
+- Shows when a demo cannot be launched because a required file is missing.
+
+Button order:
+
+1. `Forager vs Raider Deep RL GUI`
+2. `Rocket Landing Deep RL GUI`
+3. `MNIST CNN Visualizer`
+4. `Ultralytics YOLO26 Video GUI`
 
 ## Forager vs Raider Deep RL GUI
 

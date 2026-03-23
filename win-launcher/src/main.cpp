@@ -194,7 +194,6 @@ bool python_supports_launcher_runtime(const fs::path& python_exe, const fs::path
 bool python_has_importable_torch_stack(const fs::path& python_exe, const fs::path& log_file);
 void create_local_venv(const fs::path& base_python_exe, const ProjectLayout& layout);
 void repair_base_python(const ProjectLayout& layout);
-void install_python_from_msi_payloads(const LauncherConfig& config, const ProjectLayout& layout, const std::wstring& python_version);
 void install_base_python(const LauncherConfig& config, const ProjectLayout& layout, const std::wstring& python_version);
 void ensure_python_runtime(const LauncherConfig& config, const ProjectLayout& layout, const std::wstring& python_version);
 void run_python(const ProjectLayout& layout, const std::vector<std::wstring>& arguments, const std::optional<fs::path>& cwd);
@@ -1442,73 +1441,6 @@ void repair_base_python(const ProjectLayout& layout) {
     }
 }
 
-void install_python_from_msi_payloads(const LauncherConfig& config, const ProjectLayout& layout, const std::wstring& python_version) {
-    if (fs::exists(layout.python_base_dir)) {
-        fs::remove_all(layout.python_base_dir);
-    }
-    fs::create_directories(layout.cache_dir);
-    fs::create_directories(layout.logs_dir);
-    fs::create_directories(layout.python_base_dir);
-
-    const std::wstring installer_url = python_installer_url_for_version(config, python_version);
-    download_file(installer_url, layout.python_installer_file, layout.log_file);
-
-    if (fs::exists(layout.python_installer_log_file)) {
-        fs::remove(layout.python_installer_log_file);
-    }
-
-    download_python_layout(config, layout);
-
-    const std::vector<std::wstring> required_msi_names = {
-        L"core.msi",
-        L"exe.msi",
-        L"lib.msi",
-        L"tcltk.msi"
-    };
-
-    append_log_line(
-        layout.log_file,
-        L"Building the project-local Python " + python_version + L" runtime from standalone MSI payloads."
-    );
-
-    std::vector<fs::path> msi_paths;
-    msi_paths.reserve(required_msi_names.size());
-    for (const auto& msi_name : required_msi_names) {
-        const auto located_msi = locate_python_runtime_msi(config, layout, msi_name);
-        if (!located_msi.has_value()) {
-            throw make_error(
-                L"Could not locate the required Python package payload "
-                + msi_name
-                + L" for Python "
-                + config.python_series
-                + L". See "
-                + layout.log_file.wstring()
-            );
-        }
-        append_log_line(layout.log_file, L"Using " + msi_name + L" from " + located_msi->wstring());
-        msi_paths.push_back(*located_msi);
-    }
-
-    for (const auto& msi_path : msi_paths) {
-        extract_python_runtime_msi(layout, msi_path);
-    }
-
-    std::error_code fs_error;
-    for (const auto& msi_name : required_msi_names) {
-        fs::remove(layout.python_base_dir / msi_name, fs_error);
-        fs_error.clear();
-    }
-
-    fail_if(
-        !fs::exists(layout.python_base_exe) || !fs::exists(layout.python_basew_exe),
-        L"Python runtime extraction finished, but python.exe or pythonw.exe is missing in " + layout.python_base_dir.wstring()
-    );
-    fail_if(
-        !python_supports_launcher_runtime(layout.python_base_exe, layout.log_file),
-        L"The extracted Python runtime is missing one or more required modules (tkinter, ensurepip, or venv)."
-    );
-}
-
 void install_base_python(const LauncherConfig& config, const ProjectLayout& layout, const std::wstring& python_version) {
     if (fs::exists(layout.python_base_dir)) {
         fs::remove_all(layout.python_base_dir);
@@ -1575,10 +1507,10 @@ void install_base_python(const LauncherConfig& config, const ProjectLayout& layo
     } catch (const std::exception& exc) {
         append_log_line(
             layout.log_file,
-            L"Embeddable runtime setup failed. Falling back to the MSI payload runtime builder."
+            L"Embeddable runtime setup failed. No full-installer fallback is enabled."
         );
         append_log_line(layout.log_file, wide_from_utf8(exc.what()));
-        install_python_from_msi_payloads(config, layout, python_version);
+        throw;
     }
 }
 

@@ -3,9 +3,9 @@ from __future__ import annotations
 import argparse
 import time
 import tkinter as tk
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
 
@@ -213,6 +213,26 @@ SETTING_TOOLTIPS = {
     "fps": (
         "Replay speed in frames per second.\n\n"
         "This only changes how fast the visualization plays. It does not change training."
+    ),
+    "show_value_node": (
+        "Whether to show the critic value output in the network panel.\n\n"
+        "Checked: the output layer includes the value node.\n"
+        "Unchecked: only the control outputs are shown.\n"
+        "This only changes the visualization and replay readout. It does not change training."
+    ),
+    "replay_brain": (
+        "Which brain to use for the paused replay.\n\n"
+        "Current replays the brain that is being trained right now.\n"
+        "Best replays the strongest cached brain so far, ranked first by landing rate and then by mean score.\n"
+        "During active training the replay is forced back to Current automatically."
+    ),
+    "save_best_brain": (
+        "Save the cached best brain to disk.\n\n"
+        "The file includes the best policy weights and the left-panel settings that go with that brain."
+    ),
+    "load_best_brain": (
+        "Load a saved best brain from disk.\n\n"
+        "Loading replaces the in-memory best-brain cache and also restores the saved left-panel settings."
     ),
 }
 
@@ -524,6 +544,17 @@ class GenerationUpdate:
     last_loss: float | None
 
 
+@dataclass(slots=True)
+class BrainSnapshot:
+    generation: int
+    gui_config: GuiConfig
+    policy_state: dict[str, torch.Tensor]
+    success_rate: float
+    mean_reward: float
+    best_reward: float
+    show_value_node: bool
+
+
 def policy_forward_with_activations(policy, inputs_tensor):
     if torch is None or nn is None:
         raise RuntimeError("PyTorch is required for the rocket landing GUI.")
@@ -632,6 +663,78 @@ def run_visual_episode(policy, config: rocket.DemoConfig, rng: np.random.Generat
         reward=reward,
         outcome=outcome,
         landed=landed,
+    )
+
+
+def clone_policy_state(policy) -> dict[str, torch.Tensor]:
+    if torch is None:
+        raise RuntimeError("PyTorch is required for the rocket landing GUI.")
+    return {name: tensor.detach().cpu().clone() for name, tensor in policy.state_dict().items()}
+
+
+def build_policy_for_gui(config: GuiConfig, policy_state: dict[str, torch.Tensor] | None = None):
+    if torch is None:
+        raise RuntimeError("PyTorch is required for the rocket landing GUI.")
+    policy = rocket.TorchPolicy(
+        rocket.INPUT_DIM,
+        config.hidden_layers,
+        2,
+        config.activation,
+    )
+    if policy_state is not None:
+        policy.load_state_dict(policy_state)
+    policy.eval()
+    return policy
+
+
+def sample_snapshot_replay(snapshot: BrainSnapshot, rng: np.random.Generator) -> tuple[VisualReplay, list[np.ndarray]]:
+    policy = build_policy_for_gui(snapshot.gui_config, snapshot.policy_state)
+    replay = run_visual_episode(policy, snapshot.gui_config.to_demo_config(), rng)
+    return replay, policy_weight_matrices(policy)
+
+
+def serialize_brain_snapshot(snapshot: BrainSnapshot) -> dict[str, object]:
+    config_data = asdict(snapshot.gui_config)
+    config_data["hidden_layers"] = list(snapshot.gui_config.hidden_layers)
+    return {
+        "format_version": 1,
+        "generation": snapshot.generation,
+        "success_rate": float(snapshot.success_rate),
+        "mean_reward": float(snapshot.mean_reward),
+        "best_reward": float(snapshot.best_reward),
+        "show_value_node": bool(snapshot.show_value_node),
+        "config": config_data,
+        "policy_state": {name: tensor.detach().cpu().clone() for name, tensor in snapshot.policy_state.items()},
+    }
+
+
+def deserialize_brain_snapshot(payload: dict[str, object]) -> BrainSnapshot:
+    if torch is None:
+        raise RuntimeError("PyTorch is required for the rocket landing GUI.")
+    config_data = payload.get("config")
+    policy_state = payload.get("policy_state")
+    if not isinstance(config_data, dict) or not isinstance(policy_state, dict):
+        raise ValueError("The selected file does not contain a valid rocket best-brain snapshot.")
+
+    config_copy = dict(config_data)
+    hidden_layers = config_copy.get("hidden_layers", ())
+    if isinstance(hidden_layers, list):
+        config_copy["hidden_layers"] = tuple(int(value) for value in hidden_layers)
+    elif isinstance(hidden_layers, tuple):
+        config_copy["hidden_layers"] = tuple(int(value) for value in hidden_layers)
+    else:
+        config_copy["hidden_layers"] = rocket.parse_hidden_layers(str(hidden_layers))
+    config_copy.setdefault("smoke_test_generations", 0)
+    gui_config = GuiConfig(**config_copy)
+    validate_gui_config(gui_config)
+    return BrainSnapshot(
+        generation=int(payload.get("generation", 0)),
+        gui_config=gui_config,
+        policy_state={name: tensor.detach().cpu().clone() for name, tensor in policy_state.items()},
+        success_rate=float(payload.get("success_rate", 0.0)),
+        mean_reward=float(payload.get("mean_reward", 0.0)),
+        best_reward=float(payload.get("best_reward", 0.0)),
+        show_value_node=bool(payload.get("show_value_node", False)),
     )
 
 
@@ -887,12 +990,19 @@ class RocketLandingGuiApp:
         self.replay_job: str | None = None
         self.trainer: GradientRocketTrainer | None = None
         self.current_update: GenerationUpdate | None = None
+        self.best_brain: BrainSnapshot | None = None
         self.live_replay: VisualReplay | None = None
+        self.live_replay_source = "current"
+        self.live_replay_generation = 0
+        self.live_replay_config: GuiConfig | None = None
+        self.live_replay_weights: list[np.ndarray] | None = None
         self.replay_step = 0
         self.status_var = tk.StringVar(value="Ready")
         self.progress_var = tk.StringVar(value="Generation 0/0 | Landing rate 0.0%")
         self.stats_var = tk.StringVar(value="")
         self.network_var = tk.StringVar(value="")
+        self.show_value_node_var = tk.BooleanVar(value=False)
+        self.replay_brain_var = tk.StringVar(value="current")
         self.vars: dict[str, tk.Variable] = {}
         self.tooltips: list[HoverTooltip] = []
         self.sprite_renderer = RocketSpriteRenderer(Path(__file__).resolve().with_name("rocket.png"))
@@ -1056,6 +1166,49 @@ class RocketLandingGuiApp:
         self._add_entry(penalties, "reward_timeout_penalty", "Timeout penalty")
 
         self._add_entry(display, "fps", "Replay fps")
+        self._add_checkbox(
+            display,
+            "show_value_node",
+            "Show value output node",
+            self.show_value_node_var,
+            command=self._on_network_display_toggle,
+        )
+        replay_row = ttk.Frame(display)
+        replay_row.pack(fill="x", pady=(6, 2))
+        replay_label = ttk.Label(replay_row, text="Replay brain")
+        replay_label.pack(anchor="w")
+        replay_choice_row = ttk.Frame(display)
+        replay_choice_row.pack(fill="x", pady=(0, 2))
+        self.current_replay_button = ttk.Radiobutton(
+            replay_choice_row,
+            text="Current",
+            value="current",
+            variable=self.replay_brain_var,
+            command=self._on_replay_brain_change,
+        )
+        self.current_replay_button.pack(side="left")
+        self.best_replay_button = ttk.Radiobutton(
+            replay_choice_row,
+            text="Best",
+            value="best",
+            variable=self.replay_brain_var,
+            command=self._on_replay_brain_change,
+        )
+        self.best_replay_button.pack(side="left", padx=(12, 0))
+        self._attach_tooltip_widgets(
+            "replay_brain",
+            replay_label,
+            self.current_replay_button,
+            self.best_replay_button,
+        )
+        brain_button_row = ttk.Frame(display)
+        brain_button_row.pack(fill="x", pady=(6, 0))
+        self.save_best_button = ttk.Button(brain_button_row, text="Save Best Brain", command=self._save_best_brain)
+        self.save_best_button.pack(fill="x")
+        self.load_best_button = ttk.Button(brain_button_row, text="Load Best Brain", command=self._load_best_brain)
+        self.load_best_button.pack(fill="x", pady=(6, 0))
+        self._attach_tooltip_widgets("save_best_brain", self.save_best_button)
+        self._attach_tooltip_widgets("load_best_brain", self.load_best_button)
         button_row = ttk.Frame(parent)
         button_row.pack(fill="x", pady=(12, 0))
         ttk.Button(button_row, text="Start / Restart", command=self._start).pack(fill="x")
@@ -1097,12 +1250,188 @@ class RocketLandingGuiApp:
         combo_widget.pack(side="right")
         self._attach_tooltip_widgets(key, label_widget, combo_widget)
 
+    def _add_checkbox(
+        self,
+        parent: ttk.LabelFrame,
+        key: str,
+        label: str,
+        variable: tk.BooleanVar,
+        command=None,
+    ) -> None:
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=4)
+        check_widget = ttk.Checkbutton(row, text=label, variable=variable, command=command)
+        check_widget.pack(anchor="w")
+        self._attach_tooltip_widgets(key, check_widget)
+
     def _attach_tooltip_widgets(self, key: str, *widgets: tk.Widget) -> None:
         tooltip_text = SETTING_TOOLTIPS.get(key)
         if not tooltip_text:
             return
         for widget in widgets:
             self.tooltips.append(HoverTooltip(widget, tooltip_text))
+
+    def _set_widget_enabled(self, widget: tk.Widget, enabled: bool) -> None:
+        if enabled:
+            widget.state(["!disabled"])
+        else:
+            widget.state(["disabled"])
+
+    def _update_replay_source_controls(self) -> None:
+        replay_enabled = self.trainer is not None and not self.training_running
+        self._set_widget_enabled(self.current_replay_button, replay_enabled)
+        self._set_widget_enabled(self.best_replay_button, replay_enabled and self.best_brain is not None)
+        self._set_widget_enabled(self.save_best_button, self.best_brain is not None)
+        self._set_widget_enabled(self.load_best_button, True)
+        if self.training_running or (self.replay_brain_var.get() == "best" and self.best_brain is None):
+            self.replay_brain_var.set("current")
+
+    def _capture_current_brain(self, update: GenerationUpdate | None = None) -> BrainSnapshot | None:
+        if self.trainer is None:
+            return None
+        snapshot_update = update or self.current_update or self.trainer.preview
+        return BrainSnapshot(
+            generation=snapshot_update.generation,
+            gui_config=replace(self.trainer.gui_config),
+            policy_state=clone_policy_state(self.trainer.policy),
+            success_rate=float(snapshot_update.success_rate),
+            mean_reward=float(snapshot_update.mean_reward),
+            best_reward=float(snapshot_update.best_reward),
+            show_value_node=bool(self.show_value_node_var.get()),
+        )
+
+    def _maybe_update_best_brain(self, update: GenerationUpdate | None = None) -> None:
+        candidate = self._capture_current_brain(update)
+        if candidate is None:
+            return
+        if self.best_brain is None or (
+            candidate.success_rate,
+            candidate.mean_reward,
+        ) > (
+            self.best_brain.success_rate,
+            self.best_brain.mean_reward,
+        ):
+            self.best_brain = candidate
+
+    def _selected_replay_source(self) -> str:
+        if not self.training_running and self.replay_brain_var.get() == "best" and self.best_brain is not None:
+            return "best"
+        return "current"
+
+    def _active_replay_label(self) -> str:
+        if self._is_live_replay_mode():
+            return "Best brain replay" if self.live_replay_source == "best" else "Current brain replay"
+        return "Generation replay"
+
+    def _active_replay_generation(self) -> int:
+        if self._is_live_replay_mode():
+            return self.live_replay_generation
+        if self.current_update is None:
+            return 0
+        return self.current_update.generation
+
+    def _active_replay_config(self) -> GuiConfig | None:
+        if self._is_live_replay_mode():
+            return self.live_replay_config
+        if self.trainer is None:
+            return None
+        return self.trainer.gui_config
+
+    def _active_replay_weights(self) -> list[np.ndarray] | None:
+        if self._is_live_replay_mode():
+            return self.live_replay_weights
+        if self.trainer is None:
+            return None
+        return policy_weight_matrices(self.trainer.policy)
+
+    def _save_best_brain(self) -> None:
+        if torch is None:
+            messagebox.showerror("PyTorch required", "PyTorch is required to save rocket brains.")
+            return
+        if self.best_brain is None:
+            messagebox.showinfo("No best brain", "There is no cached best brain to save yet.")
+            return
+        save_path = filedialog.asksaveasfilename(
+            title="Save Best Rocket Brain",
+            defaultextension=".rocketbrain",
+            filetypes=(
+                ("Rocket brain files", "*.rocketbrain"),
+                ("PyTorch files", "*.pt"),
+                ("All files", "*.*"),
+            ),
+            initialfile=f"rocket-best-g{self.best_brain.generation}.rocketbrain",
+        )
+        if not save_path:
+            return
+        snapshot = BrainSnapshot(
+            generation=self.best_brain.generation,
+            gui_config=replace(self.best_brain.gui_config),
+            policy_state={name: tensor.detach().cpu().clone() for name, tensor in self.best_brain.policy_state.items()},
+            success_rate=self.best_brain.success_rate,
+            mean_reward=self.best_brain.mean_reward,
+            best_reward=self.best_brain.best_reward,
+            show_value_node=bool(self.show_value_node_var.get()),
+        )
+        try:
+            torch.save(serialize_brain_snapshot(snapshot), save_path)
+        except Exception as exc:
+            messagebox.showerror("Save failed", str(exc))
+            self.status_var.set("Best-brain save failed")
+            return
+        self._sync_progress_indicators(prefix=f"Saved best brain: {Path(save_path).name}")
+
+    def _load_best_brain(self) -> None:
+        if torch is None:
+            messagebox.showerror("PyTorch required", "PyTorch is required to load rocket brains.")
+            return
+        load_path = filedialog.askopenfilename(
+            title="Load Best Rocket Brain",
+            filetypes=(
+                ("Rocket brain files", "*.rocketbrain"),
+                ("PyTorch files", "*.pt"),
+                ("All files", "*.*"),
+            ),
+        )
+        if not load_path:
+            return
+        if self.training_running:
+            self._pause_training()
+        try:
+            payload = torch.load(load_path, map_location="cpu")
+            snapshot = deserialize_brain_snapshot(payload)
+            build_policy_for_gui(snapshot.gui_config, snapshot.policy_state)
+        except Exception as exc:
+            messagebox.showerror("Load failed", str(exc))
+            self.status_var.set("Best-brain load failed")
+            return
+        self.best_brain = snapshot
+        self._set_vars_from_config(snapshot.gui_config)
+        self.show_value_node_var.set(snapshot.show_value_node)
+        self._update_replay_source_controls()
+        if not self.training_running and self.replay_brain_var.get() == "best":
+            self._start_live_replay(force_new=True)
+        else:
+            self._refresh_views()
+        self._sync_progress_indicators(prefix=f"Loaded best brain: {Path(load_path).name}")
+
+    def _on_replay_brain_change(self) -> None:
+        if self.training_running:
+            self.replay_brain_var.set("current")
+            return
+        if self.trainer is None:
+            return
+        self._start_live_replay(force_new=True)
+        self._sync_progress_indicators(prefix=self._active_replay_label())
+
+    def _on_network_display_toggle(self) -> None:
+        self._refresh_network_text()
+        self._draw_network()
+
+    def _display_output_values(self, raw_outputs: list[float] | tuple[float, ...]) -> tuple[tuple[str, ...], list[float]]:
+        output_values = list(raw_outputs)
+        if self.show_value_node_var.get():
+            return OUTPUT_LABELS, output_values
+        return OUTPUT_LABELS[:2], output_values[:2]
 
     def _set_vars_from_config(self, config: GuiConfig) -> None:
         values = {
@@ -1205,6 +1534,8 @@ class RocketLandingGuiApp:
         if self.training_job is not None:
             self.root.after_cancel(self.training_job)
             self.training_job = None
+        self.replay_brain_var.set("current")
+        self._update_replay_source_controls()
         self._start_live_replay(force_new=True)
         self._sync_progress_indicators(prefix="Training paused")
 
@@ -1218,7 +1549,13 @@ class RocketLandingGuiApp:
             self._sync_progress_indicators(prefix="Training already complete")
             return
         self.training_running = True
+        self.replay_brain_var.set("current")
         self.live_replay = None
+        self.live_replay_source = "current"
+        self.live_replay_generation = 0
+        self.live_replay_config = None
+        self.live_replay_weights = None
+        self._update_replay_source_controls()
         self._sync_progress_indicators(prefix="Training running")
         self._schedule_training()
 
@@ -1231,7 +1568,13 @@ class RocketLandingGuiApp:
             config = self._config_from_vars()
             self.trainer = GradientRocketTrainer(config)
             self.current_update = self.trainer.preview
+            self.best_brain = self._capture_current_brain(self.trainer.preview)
             self.live_replay = None
+            self.live_replay_source = "current"
+            self.live_replay_generation = 0
+            self.live_replay_config = None
+            self.live_replay_weights = None
+            self.replay_brain_var.set("current")
         except Exception as exc:
             messagebox.showerror("Invalid settings", str(exc))
             self.status_var.set("Settings error")
@@ -1241,6 +1584,7 @@ class RocketLandingGuiApp:
         if self.training_job is not None:
             self.root.after_cancel(self.training_job)
             self.training_job = None
+        self._update_replay_source_controls()
         self._refresh_views()
         self._sync_progress_indicators(prefix="Training running" if run else "Ready")
         if run:
@@ -1251,6 +1595,8 @@ class RocketLandingGuiApp:
             return
         if len(self.trainer.history) >= self.trainer.config.generations:
             self.training_running = False
+            self.replay_brain_var.set("current")
+            self._update_replay_source_controls()
             self._start_live_replay(force_new=True)
             self._sync_progress_indicators(prefix="Training complete")
             return
@@ -1263,11 +1609,19 @@ class RocketLandingGuiApp:
             return
         update = self.trainer.train_generation()
         self.current_update = update
+        self._maybe_update_best_brain(update)
         self.live_replay = None
+        self.live_replay_source = "current"
+        self.live_replay_generation = 0
+        self.live_replay_config = None
+        self.live_replay_weights = None
         self.replay_step = 0
+        self._update_replay_source_controls()
         self._refresh_views()
         if update.generation >= self.trainer.config.generations:
             self.training_running = False
+            self.replay_brain_var.set("current")
+            self._update_replay_source_controls()
             self._start_live_replay(force_new=True)
             self._sync_progress_indicators(prefix="Training complete")
         else:
@@ -1298,15 +1652,22 @@ class RocketLandingGuiApp:
         update = self.current_update
         replay = self._active_replay()
         loss_text = "n/a" if update.last_loss is None else f"{update.last_loss:.4f}"
-        replay_mode = "live current-brain" if self._is_live_replay_mode() else "generation replay"
+        replay_mode = self._active_replay_label().lower()
         replay_outcome = replay.outcome if replay is not None else "n/a"
         replay_reward = replay.reward if replay is not None else 0.0
+        best_brain_text = "none"
+        if self.best_brain is not None:
+            best_brain_text = (
+                f"G{self.best_brain.generation} | land={self.best_brain.success_rate * 100:.1f}% "
+                f"| mean={self.best_brain.mean_reward:.2f}"
+            )
         return [
             f"trainer={self.trainer.config.trainer} | hidden={format_hidden_layers(self.trainer.config.hidden_layers)} | activation={self.trainer.config.activation}",
             f"generation={update.generation}/{self.trainer.config.generations} | best_reward={update.best_reward:.2f} | mean_reward={update.mean_reward:.2f}",
             f"landing_rate={update.success_rate * 100:.1f}% | last_loss={loss_text} | elapsed={update.elapsed_seconds:.1f}s",
             f"spawn={self.trainer.config.spawn_mode}/{self.trainer.config.spawn_randomness} | batch_episodes={self.trainer.config.batch_episodes} | rollouts={self.trainer.config.rollouts}",
             f"replay_mode={replay_mode} | replay_outcome={replay_outcome} | replay_reward={replay_reward:.2f}",
+            f"best_brain={best_brain_text}",
         ]
 
     def _refresh_views(self) -> None:
@@ -1330,7 +1691,7 @@ class RocketLandingGuiApp:
         status_bits = [prefix] if prefix else []
         status_bits.append(progress_text)
         if self._is_live_replay_mode():
-            status_bits.append("Live replay")
+            status_bits.append(self._active_replay_label())
         if not self.replay_playing:
             status_bits.append("Replay paused")
         self.status_var.set(" | ".join(status_bits))
@@ -1340,18 +1701,24 @@ class RocketLandingGuiApp:
         if self.trainer is None or self.current_update is None or replay is None or not replay.outputs:
             self.network_var.set("No replay available yet.")
             return
+        replay_config = self._active_replay_config()
         frame = min(self.replay_step, len(replay.outputs) - 1)
         outputs = replay.outputs[frame]
         turn_cmd = float(replay.turn_commands[frame])
         throttle = float(replay.throttles[frame])
         fuel = float(replay.fuels[frame])
-        replay_label = "Live replay" if self._is_live_replay_mode() else "Generation replay"
+        replay_label = self._active_replay_label()
+        output_labels, display_outputs = self._display_output_values(outputs)
+        output_bits = [
+            f"{label.replace('_mu', ' mean').replace('_', ' ').title()}={value:+.3f}"
+            for label, value in zip(output_labels, display_outputs)
+        ]
         self.network_var.set(
             "\n".join(
                 [
-                    f"{replay_label} | Generation: {self.current_update.generation} | Step: {frame + 1}/{len(replay.outputs)}",
-                    f"Hidden layout: {format_hidden_layers(self.trainer.config.hidden_layers)}",
-                    f"Turn mean={outputs[0]:+.3f} | Throttle mean={outputs[1]:+.3f} | Value={outputs[2]:+.3f}",
+                    f"{replay_label} | Generation: {self._active_replay_generation()} | Step: {frame + 1}/{len(replay.outputs)}",
+                    f"Hidden layout: {format_hidden_layers(replay_config.hidden_layers) if replay_config else 'n/a'}",
+                    " | ".join(output_bits),
                     f"Applied turn={turn_cmd:+.3f} | Applied throttle={throttle:.3f} | Fuel={fuel:.3f}",
                 ]
             )
@@ -1370,9 +1737,23 @@ class RocketLandingGuiApp:
     def _start_live_replay(self, force_new: bool) -> None:
         if self.trainer is None:
             return
-        if force_new or self.live_replay is None:
-            self.live_replay = self.trainer.sample_replay()
+        replay_source = self._selected_replay_source()
+        needs_refresh = force_new or self.live_replay is None or self.live_replay_source != replay_source
+        if needs_refresh:
+            replay_rng = np.random.default_rng(int(self.trainer.rng.integers(0, 2_000_000_000)))
+            if replay_source == "best" and self.best_brain is not None:
+                self.live_replay, self.live_replay_weights = sample_snapshot_replay(self.best_brain, replay_rng)
+                self.live_replay_generation = self.best_brain.generation
+                self.live_replay_config = replace(self.best_brain.gui_config)
+                self.live_replay_source = "best"
+            else:
+                self.live_replay = self.trainer.sample_replay()
+                self.live_replay_weights = policy_weight_matrices(self.trainer.policy)
+                self.live_replay_generation = self.current_update.generation if self.current_update is not None else 0
+                self.live_replay_config = replace(self.trainer.gui_config)
+                self.live_replay_source = "current"
             self.replay_step = 0
+        self._update_replay_source_controls()
         self._refresh_views()
 
     def _world_to_canvas(self, x: float, y: float, width: float, height: float) -> tuple[float, float]:
@@ -1417,7 +1798,9 @@ class RocketLandingGuiApp:
             )
             return
 
-        config = self.trainer.config
+        config = self._active_replay_config()
+        if config is None:
+            return
         frame = min(self.replay_step, len(replay.positions) - 1)
         path = replay.positions[: frame + 1]
         position = path[-1]
@@ -1639,13 +2022,19 @@ class RocketLandingGuiApp:
             )
             return
 
+        replay_config = self._active_replay_config()
+        weights = self._active_replay_weights()
+        if replay_config is None or weights is None:
+            return
         frame = min(self.replay_step, len(replay.outputs) - 1)
         input_values = list(replay.inputs[frame])
         hidden_values = [list(layer) for layer in replay.hidden_values[frame]]
-        output_values = list(replay.outputs[frame])
+        output_labels, output_values = self._display_output_values(replay.outputs[frame])
         layers = [input_values] + hidden_values + [output_values]
         layer_names = ["Inputs"] + [f"H{i + 1}" for i in range(len(hidden_values))] + ["Outputs"]
-        weights = policy_weight_matrices(self.trainer.policy)
+        if weights and len(output_values) < len(replay.outputs[frame]):
+            weights = list(weights)
+            weights[-1] = weights[-1][: len(output_values), :]
         x_positions = np.linspace(56, width - 56, num=len(layers))
         node_positions: list[list[tuple[float, float]]] = []
 
@@ -1681,7 +2070,7 @@ class RocketLandingGuiApp:
                     canvas.create_text(x - 18, y, text=INPUT_LABELS[node_index], anchor="e", font=("Consolas", 9), fill="#4a5f65")
                     canvas.create_text(x + 18, y, text=f"{value:+.2f}", anchor="w", font=("Consolas", 9), fill="#22383e")
                 elif layer_index == len(layers) - 1:
-                    canvas.create_text(x + 18, y - 7, text=OUTPUT_LABELS[node_index], anchor="w", font=("Segoe UI", 9), fill="#4a5f65")
+                    canvas.create_text(x + 18, y - 7, text=output_labels[node_index], anchor="w", font=("Segoe UI", 9), fill="#4a5f65")
                     canvas.create_text(x + 18, y + 7, text=f"{value:+.2f}", anchor="w", font=("Consolas", 10), fill="#1f3338")
                 elif len(layer_values) <= 20:
                     canvas.create_text(x + 16, y, text=f"{value:+.2f}", anchor="w", font=("Consolas", 8), fill="#21383e")
@@ -1734,7 +2123,10 @@ class RocketLandingGuiApp:
         canvas.create_text(
             width / 2,
             height - 20,
-            text=f"activation={self.trainer.config.activation} | raw outputs -> tanh(turn), sigmoid(throttle)",
+            text=(
+                f"activation={replay_config.activation} | raw outputs -> tanh(turn), sigmoid(throttle)"
+                + (" | value shown" if self.show_value_node_var.get() else " | value hidden")
+            ),
             font=("Segoe UI", 10),
             fill="#42575d",
         )

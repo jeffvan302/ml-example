@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <cstdint>
 #include <locale>
 #include <memory>
 #include <optional>
@@ -37,22 +38,26 @@ constexpr UINT WMU_STATUS = WM_APP + 1;
 constexpr UINT WMU_LOG = WM_APP + 2;
 constexpr UINT WMU_FAILED = WM_APP + 3;
 constexpr UINT WMU_LAUNCHED = WM_APP + 4;
-constexpr int kProgressMax = 8;
+constexpr int kProgressMax = 7;
 constexpr wchar_t kWindowClassName[] = L"project_python_runtime_launcher";
+constexpr int kControlClose = 1;
+constexpr int kControlStart = 2;
+constexpr int kControlPythonSourceCombo = 100;
+constexpr int kControlEnvironmentDirect = 101;
+constexpr int kControlEnvironmentNamed = 102;
+constexpr int kControlEnvironmentNameEdit = 103;
+constexpr int kControlTorchCuda = 120;
+constexpr int kControlTorchRocm = 121;
+constexpr int kControlTorchXpu = 122;
+constexpr int kControlTorchCpu = 123;
+constexpr int kControlLaunchScript = 140;
+constexpr int kControlScriptCombo = 141;
+constexpr int kControlLaunchCustom = 142;
+constexpr int kControlCustomCommandEdit = 143;
 
 struct UiMessage {
     int step = 0;
     std::wstring text;
-};
-
-struct WindowState {
-    HWND status_label = nullptr;
-    HWND progress_bar = nullptr;
-    HWND log_edit = nullptr;
-    HWND close_button = nullptr;
-    HWND detail_label = nullptr;
-    bool can_close = false;
-    fs::path log_file;
 };
 
 struct LauncherConfig {
@@ -96,14 +101,37 @@ struct ProjectLayout {
     fs::path python_embeddable_file;
     fs::path python_installer_log_file;
     fs::path requirements_file;
+    fs::path run_config_file;
+    fs::path envs_dir;
     fs::path run_script;
     fs::path pip_cache_dir;
+    fs::path active_python_exe;
+    fs::path active_pythonw_exe;
+    fs::path active_environment_dir;
+};
+
+enum class PythonSourceKind {
+    Existing,
+    InstallMachine,
+    Portable,
+};
+
+enum class EnvironmentKind {
+    Direct,
+    NamedVenv,
+    NamedConda,
+    PortableRuntime,
+};
+
+enum class LaunchKind {
+    Script,
+    PythonArgs,
 };
 
 enum class AcceleratorKind {
     NvidiaCuda,
     IntelArcXpu,
-    AmdRocmDetected,
+    AmdRocm,
     Cpu,
 };
 
@@ -115,9 +143,83 @@ struct AcceleratorChoice {
     std::wstring note;
 };
 
+struct PythonSourceOption {
+    PythonSourceKind kind = PythonSourceKind::Portable;
+    std::wstring label;
+    std::wstring description;
+    std::wstring version;
+    fs::path python_exe;
+    fs::path pythonw_exe;
+    bool is_conda = false;
+    std::wstring conda_name;
+};
+
+struct RequirementsSnapshot {
+    std::optional<fs::path> filtered_file;
+    std::wstring hash;
+};
+
+struct RunConfig {
+    int schema_version = 2;
+    std::wstring python_version;
+    PythonSourceKind python_source_kind = PythonSourceKind::Portable;
+    std::wstring python_source_label;
+    fs::path python_source_path;
+    fs::path python_sourcew_path;
+    EnvironmentKind environment_kind = EnvironmentKind::PortableRuntime;
+    std::wstring environment_name;
+    fs::path environment_path;
+    AcceleratorKind accelerator_kind = AcceleratorKind::Cpu;
+    LaunchKind launch_kind = LaunchKind::Script;
+    std::wstring launch_target;
+    std::wstring requirements_hash;
+    std::wstring requirements_synced_at;
+};
+
+struct WindowState {
+    HWND setup_intro = nullptr;
+    HWND python_source_label = nullptr;
+    HWND python_source_combo = nullptr;
+    HWND python_source_note = nullptr;
+    HWND environment_direct_radio = nullptr;
+    HWND environment_named_radio = nullptr;
+    HWND environment_name_label = nullptr;
+    HWND environment_name_edit = nullptr;
+    HWND torch_label = nullptr;
+    HWND torch_cuda_radio = nullptr;
+    HWND torch_rocm_radio = nullptr;
+    HWND torch_xpu_radio = nullptr;
+    HWND torch_cpu_radio = nullptr;
+    HWND torch_note = nullptr;
+    HWND launch_script_radio = nullptr;
+    HWND script_combo = nullptr;
+    HWND launch_custom_radio = nullptr;
+    HWND custom_command_edit = nullptr;
+    HWND launch_note = nullptr;
+    HWND start_button = nullptr;
+    HWND status_label = nullptr;
+    HWND progress_bar = nullptr;
+    HWND log_edit = nullptr;
+    HWND close_button = nullptr;
+    HWND detail_label = nullptr;
+    bool can_close = true;
+    bool setup_mode = true;
+    bool run_started = false;
+    LauncherConfig config;
+    ProjectLayout layout;
+    std::vector<PythonSourceOption> python_sources;
+    std::vector<fs::path> script_options;
+    std::optional<RunConfig> saved_config;
+    std::vector<std::wstring> extra_args;
+    fs::path log_file;
+    fs::path conda_executable;
+    bool conda_available = false;
+};
+
 struct WorkerContext {
     LauncherConfig config;
     ProjectLayout layout;
+    RunConfig run_config;
     HWND hwnd = nullptr;
     std::vector<std::wstring> extra_args;
 };
@@ -134,6 +236,21 @@ std::wstring current_timestamp_local();
 void ensure_parent_directory(const fs::path& path);
 void write_text_file_utf8(const fs::path& path, const std::string& content);
 std::wstring read_text_file_utf8(const fs::path& path);
+std::wstring hash_text_utf8(const std::wstring& value);
+std::vector<std::wstring> split_lines(const std::wstring& value);
+std::vector<std::wstring> split_command_line(const std::wstring& value);
+std::wstring sanitize_environment_name(const std::wstring& value);
+std::wstring default_environment_name(const ProjectLayout& layout);
+std::wstring xml_escape(const std::wstring& value);
+std::wstring xml_unescape(std::wstring value);
+std::optional<std::wstring> xml_element_attributes(const std::wstring& xml, const std::wstring& tag_name);
+std::optional<std::wstring> xml_attribute_value(const std::wstring& attributes, const std::wstring& attribute_name);
+bool path_exists_no_throw(const fs::path& path);
+bool path_is_windows_apps_alias(const fs::path& path);
+std::wstring normalized_path_key(const fs::path& path);
+std::optional<fs::path> find_conda_executable();
+std::vector<std::pair<std::wstring, fs::path>> discover_conda_environment_prefixes(const ProjectLayout& layout);
+std::optional<fs::path> find_conda_environment_prefix(const ProjectLayout& layout, const std::wstring& environment_name);
 void append_log_line(const fs::path& path, const std::wstring& message);
 void post_message(HWND hwnd, UINT message_id, int step, const std::wstring& text);
 void post_status(HWND hwnd, int step, const std::wstring& text);
@@ -150,6 +267,13 @@ int run_process(
     const std::optional<fs::path>& working_dir,
     const fs::path& log_file,
     bool hidden = true
+);
+std::wstring run_process_capture(
+    const fs::path& executable,
+    const std::vector<std::wstring>& arguments,
+    const std::optional<fs::path>& working_dir,
+    const ProjectLayout& layout,
+    bool allow_non_zero_exit = false
 );
 void start_detached_process(
     const fs::path& executable,
@@ -168,6 +292,24 @@ std::wstring resolve_latest_python_version(const LauncherConfig& config, const P
 std::optional<std::wstring> read_registry_default_value(HKEY root, const std::wstring& subkey);
 std::optional<std::wstring> read_registry_string_value(HKEY root, const std::wstring& subkey, const std::wstring& value_name);
 std::optional<fs::path> find_registered_python_install_dir(const LauncherConfig& config);
+std::optional<PythonSourceOption> probe_python_source(
+    const fs::path& python_exe,
+    const ProjectLayout& layout,
+    const std::wstring& python_series,
+    const std::wstring& label_prefix,
+    PythonSourceKind kind
+);
+std::vector<PythonSourceOption> discover_python_sources(const LauncherConfig& config, const ProjectLayout& layout);
+std::vector<fs::path> discover_script_options(const ProjectLayout& layout);
+std::optional<RunConfig> load_run_config(const ProjectLayout& layout);
+void write_run_config(const ProjectLayout& layout, const RunConfig& run_config);
+bool run_config_is_usable(const RunConfig& run_config, const ProjectLayout& layout);
+void configure_active_python(
+    ProjectLayout& layout,
+    const fs::path& python_exe,
+    const fs::path& pythonw_exe,
+    const std::optional<fs::path>& environment_dir
+);
 bool paths_equivalent_loose(const fs::path& left, const fs::path& right);
 void cleanup_local_python_registration(const LauncherConfig& config, const ProjectLayout& layout);
 bool command_exists_on_path(const std::wstring& executable_name);
@@ -175,6 +317,7 @@ std::vector<std::wstring> enumerate_display_adapter_names();
 bool contains_case_insensitive(const std::wstring& text, const std::wstring& needle);
 std::optional<std::wstring> env_value(const std::wstring& name);
 AcceleratorChoice detect_accelerator(const LauncherConfig& config, const ProjectLayout& layout);
+AcceleratorChoice accelerator_choice_for_kind(const LauncherConfig& config, AcceleratorKind kind);
 std::wstring python_installer_url_for_version(const LauncherConfig& config, const std::wstring& version);
 std::wstring python_embeddable_url_for_version(const LauncherConfig& config, const std::wstring& version);
 fs::path windows_system_executable(const std::wstring& executable_name);
@@ -192,14 +335,18 @@ void set_child_environment(const ProjectLayout& layout);
 bool python_supports_tkinter(const fs::path& python_exe, const fs::path& log_file);
 bool python_supports_launcher_runtime(const fs::path& python_exe, const fs::path& log_file);
 bool python_has_importable_torch_stack(const fs::path& python_exe, const fs::path& log_file);
+void create_virtual_environment(const fs::path& base_python_exe, const fs::path& environment_dir, const ProjectLayout& layout);
 void create_local_venv(const fs::path& base_python_exe, const ProjectLayout& layout);
+void create_or_update_conda_environment(const ProjectLayout& layout, const std::wstring& environment_name, const std::wstring& python_version);
 void repair_base_python(const ProjectLayout& layout);
 void install_base_python(const LauncherConfig& config, const ProjectLayout& layout, const std::wstring& python_version);
+void install_machine_python(const LauncherConfig& config, const ProjectLayout& layout, const std::wstring& python_version);
 void ensure_python_runtime(const LauncherConfig& config, const ProjectLayout& layout, const std::wstring& python_version);
 void run_python(const ProjectLayout& layout, const std::vector<std::wstring>& arguments, const std::optional<fs::path>& cwd);
 void ensure_packaging_tools(const ProjectLayout& layout);
 std::wstring canonical_requirement_name(const std::wstring& requirement_line);
 std::optional<fs::path> prepare_filtered_requirements(const ProjectLayout& layout);
+RequirementsSnapshot collect_requirements_snapshot(const ProjectLayout& layout);
 std::vector<std::wstring> pip_install_arguments(
     const std::vector<std::wstring>& packages,
     const std::optional<std::wstring>& index_url
@@ -207,8 +354,13 @@ std::vector<std::wstring> pip_install_arguments(
 void uninstall_torch_packages(const ProjectLayout& layout);
 void install_torch_stack(const ProjectLayout& layout, const AcceleratorChoice& accelerator);
 void install_project_requirements(const ProjectLayout& layout);
-void launch_run_script(const ProjectLayout& layout, const std::vector<std::wstring>& extra_args);
+void sync_project_requirements(const ProjectLayout& layout, RunConfig& run_config);
+void launch_selected_target(const ProjectLayout& layout, const RunConfig& run_config, const std::vector<std::wstring>& extra_args);
 ProjectLayout resolve_project_layout(const LauncherConfig& config);
+RunConfig collect_run_config_from_controls(HWND hwnd, const WindowState& state);
+void update_setup_controls(HWND hwnd);
+void set_window_mode(HWND hwnd, bool setup_mode);
+void start_launcher_run(HWND hwnd, const RunConfig& run_config, bool confirm_direct_install = true);
 void bootstrap_worker(WorkerContext context);
 void append_log_to_edit(HWND edit_control, const std::wstring& text);
 LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param);
@@ -344,6 +496,272 @@ std::wstring read_text_file_utf8(const fs::path& path) {
     std::ostringstream buffer;
     buffer << stream.rdbuf();
     return wide_from_utf8(buffer.str());
+}
+
+std::wstring hash_text_utf8(const std::wstring& value) {
+    constexpr std::uint64_t kOffsetBasis = 1469598103934665603ULL;
+    constexpr std::uint64_t kPrime = 1099511628211ULL;
+    std::uint64_t hash = kOffsetBasis;
+    const std::string encoded = utf8_from_wide(value);
+    for (const unsigned char byte : encoded) {
+        hash ^= static_cast<std::uint64_t>(byte);
+        hash *= kPrime;
+    }
+    wchar_t buffer[17]{};
+    swprintf_s(buffer, L"%016llx", static_cast<unsigned long long>(hash));
+    return buffer;
+}
+
+std::vector<std::wstring> split_lines(const std::wstring& value) {
+    std::vector<std::wstring> lines;
+    std::wstringstream stream(value);
+    std::wstring line;
+    while (std::getline(stream, line)) {
+        lines.push_back(trim_copy(line));
+    }
+    return lines;
+}
+
+std::vector<std::wstring> split_command_line(const std::wstring& value) {
+    const std::wstring trimmed = trim_copy(value);
+    if (trimmed.empty()) {
+        return {};
+    }
+    const std::wstring command_line = L"launcher.exe " + trimmed;
+    int argument_count = 0;
+    LPWSTR* arguments = CommandLineToArgvW(command_line.c_str(), &argument_count);
+    fail_if(arguments == nullptr, L"Could not parse the custom Python command.");
+    std::vector<std::wstring> result;
+    for (int index = 1; index < argument_count; ++index) {
+        result.emplace_back(arguments[index]);
+    }
+    LocalFree(arguments);
+    return result;
+}
+
+std::wstring sanitize_environment_name(const std::wstring& value) {
+    std::wstring sanitized;
+    sanitized.reserve(value.size());
+    for (const wchar_t ch : value) {
+        if (std::iswalnum(ch) || ch == L'-' || ch == L'_') {
+            sanitized += ch;
+        } else if (ch == L' ' || ch == L'.') {
+            sanitized += L'-';
+        }
+    }
+    while (!sanitized.empty() && (sanitized.front() == L'-' || sanitized.front() == L'_')) {
+        sanitized.erase(sanitized.begin());
+    }
+    while (!sanitized.empty() && (sanitized.back() == L'-' || sanitized.back() == L'_')) {
+        sanitized.pop_back();
+    }
+    return sanitized;
+}
+
+std::wstring default_environment_name(const ProjectLayout& layout) {
+    const std::wstring base_name = sanitize_environment_name(layout.project_root.filename().wstring());
+    if (!base_name.empty()) {
+        return base_name + L"-312";
+    }
+    return L"project-312";
+}
+
+std::wstring xml_escape(const std::wstring& value) {
+    std::wstring escaped = value;
+    escaped = replace_all(std::move(escaped), L"&", L"&amp;");
+    escaped = replace_all(std::move(escaped), L"\"", L"&quot;");
+    escaped = replace_all(std::move(escaped), L"'", L"&apos;");
+    escaped = replace_all(std::move(escaped), L"<", L"&lt;");
+    escaped = replace_all(std::move(escaped), L">", L"&gt;");
+    return escaped;
+}
+
+std::wstring xml_unescape(std::wstring value) {
+    value = replace_all(std::move(value), L"&quot;", L"\"");
+    value = replace_all(std::move(value), L"&apos;", L"'");
+    value = replace_all(std::move(value), L"&lt;", L"<");
+    value = replace_all(std::move(value), L"&gt;", L">");
+    value = replace_all(std::move(value), L"&amp;", L"&");
+    return value;
+}
+
+std::optional<std::wstring> xml_element_attributes(const std::wstring& xml, const std::wstring& tag_name) {
+    const std::wstring marker = L"<" + tag_name + L" ";
+    const size_t start = xml.find(marker);
+    if (start == std::wstring::npos) {
+        return std::nullopt;
+    }
+    const size_t end = xml.find(L"/>", start);
+    if (end == std::wstring::npos) {
+        return std::nullopt;
+    }
+    return xml.substr(start + marker.size(), end - (start + marker.size()));
+}
+
+std::optional<std::wstring> xml_attribute_value(const std::wstring& attributes, const std::wstring& attribute_name) {
+    const std::wstring marker = attribute_name + L"=\"";
+    const size_t start = attributes.find(marker);
+    if (start == std::wstring::npos) {
+        return std::nullopt;
+    }
+    const size_t value_start = start + marker.size();
+    const size_t value_end = attributes.find(L"\"", value_start);
+    if (value_end == std::wstring::npos) {
+        return std::nullopt;
+    }
+    return xml_unescape(attributes.substr(value_start, value_end - value_start));
+}
+
+bool path_exists_no_throw(const fs::path& path) {
+    std::error_code error;
+    const bool exists = fs::exists(path, error);
+    return !error && exists;
+}
+
+bool path_is_windows_apps_alias(const fs::path& path) {
+    const std::wstring lowered = lower_copy(path.wstring());
+    return lowered.find(L"\\appdata\\local\\microsoft\\windowsapps\\") != std::wstring::npos;
+}
+
+std::wstring normalized_path_key(const fs::path& path) {
+    std::wstring text = lower_copy(path.lexically_normal().wstring());
+    while (text.size() > 3 && (text.back() == L'\\' || text.back() == L'/')) {
+        text.pop_back();
+    }
+    return text;
+}
+
+std::optional<fs::path> find_conda_executable() {
+    if (const auto on_path = find_executable_on_path(L"conda.exe")) {
+        return on_path;
+    }
+
+    std::vector<fs::path> roots;
+    if (const auto user_profile = env_value(L"USERPROFILE")) {
+        roots.push_back(*user_profile);
+    }
+    if (const auto local_app_data = env_value(L"LOCALAPPDATA")) {
+        roots.push_back(*local_app_data);
+    }
+    if (const auto program_data = env_value(L"PROGRAMDATA")) {
+        roots.push_back(*program_data);
+    }
+
+    const std::vector<std::wstring> install_names = {
+        L"miniconda3",
+        L"anaconda3",
+        L"miniforge3",
+        L"mambaforge",
+        L"micromamba"
+    };
+
+    for (const auto& root : roots) {
+        for (const auto& install_name : install_names) {
+            const fs::path candidate = root / install_name / "Scripts" / "conda.exe";
+            if (path_exists_no_throw(candidate)) {
+                return candidate;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+std::vector<std::pair<std::wstring, fs::path>> discover_conda_environment_prefixes(const ProjectLayout& layout) {
+    std::vector<std::pair<std::wstring, fs::path>> environments;
+    const auto conda_exe = find_conda_executable();
+    if (!conda_exe.has_value()) {
+        return environments;
+    }
+
+    auto append_unique = [&](std::wstring name, fs::path prefix) {
+        if (name.empty() || prefix.empty() || !path_exists_no_throw(prefix / "python.exe")) {
+            return;
+        }
+        for (const auto& existing : environments) {
+            if (paths_equivalent_loose(existing.second, prefix)) {
+                return;
+            }
+        }
+        environments.emplace_back(std::move(name), std::move(prefix));
+    };
+
+    try {
+        const std::wstring listing = run_process_capture(*conda_exe, {L"env", L"list"}, std::nullopt, layout, true);
+        for (const auto& raw_line : split_lines(listing)) {
+            const std::wstring line = trim_copy(raw_line);
+            if (line.empty() || line.front() == L'#') {
+                continue;
+            }
+            std::wsmatch match;
+            const std::wregex path_pattern(LR"(([A-Za-z]:\\.+))", std::regex::icase);
+            if (!std::regex_search(line, match, path_pattern) || match.size() < 2) {
+                continue;
+            }
+
+            const fs::path prefix = trim_copy(match[1].str());
+            std::wstring name = trim_copy(line.substr(0, static_cast<size_t>(match.position(1))));
+            name = replace_all(name, L"*", L"");
+            name = trim_copy(name);
+            if (name.empty()) {
+                name = prefix.filename().wstring();
+            }
+            if (name.empty()) {
+                name = L"base";
+            }
+            append_unique(name, prefix);
+        }
+    } catch (const std::exception& exc) {
+        append_log_line(layout.log_file, L"Could not enumerate conda environments: " + wide_from_utf8(exc.what()));
+    }
+
+    const fs::path conda_root = conda_exe->parent_path().parent_path();
+    append_unique(L"base", conda_root);
+
+    const std::vector<fs::path> env_roots = {
+        conda_root / "envs",
+        env_value(L"USERPROFILE").has_value() ? fs::path(*env_value(L"USERPROFILE")) / ".conda" / "envs" : fs::path()
+    };
+
+    for (const auto& env_root : env_roots) {
+        if (env_root.empty() || !path_exists_no_throw(env_root)) {
+            continue;
+        }
+        std::error_code iter_error;
+        for (fs::directory_iterator it(env_root, fs::directory_options::skip_permission_denied, iter_error);
+             it != fs::directory_iterator();
+             it.increment(iter_error)) {
+            if (iter_error) {
+                iter_error.clear();
+                continue;
+            }
+            if (!it->is_directory(iter_error)) {
+                if (iter_error) {
+                    iter_error.clear();
+                }
+                continue;
+            }
+            append_unique(it->path().filename().wstring(), it->path());
+        }
+    }
+
+    std::sort(
+        environments.begin(),
+        environments.end(),
+        [](const auto& left, const auto& right) {
+            return lower_copy(left.first) < lower_copy(right.first);
+        }
+    );
+    return environments;
+}
+
+std::optional<fs::path> find_conda_environment_prefix(const ProjectLayout& layout, const std::wstring& environment_name) {
+    const std::wstring target = lower_copy(trim_copy(environment_name));
+    for (const auto& environment : discover_conda_environment_prefixes(layout)) {
+        if (lower_copy(environment.first) == target) {
+            return environment.second;
+        }
+    }
+    return std::nullopt;
 }
 
 void append_log_line(const fs::path& path, const std::wstring& message) {
@@ -511,6 +929,30 @@ int run_process(
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     return static_cast<int>(exit_code);
+}
+
+std::wstring run_process_capture(
+    const fs::path& executable,
+    const std::vector<std::wstring>& arguments,
+    const std::optional<fs::path>& working_dir,
+    const ProjectLayout& layout,
+    bool allow_non_zero_exit
+) {
+    const DWORD tick_count = GetTickCount();
+    const fs::path capture_file = layout.cache_dir / (L"capture-" + wide_from_utf8(std::to_string(tick_count)) + L".log");
+    const int exit_code = run_process(executable, arguments, working_dir, capture_file, true);
+    const std::wstring output = read_text_file_utf8(capture_file);
+    std::error_code fs_error;
+    fs::remove(capture_file, fs_error);
+    if (exit_code != 0 && !allow_non_zero_exit) {
+        throw make_error(
+            L"Command failed with exit code "
+            + wide_from_utf8(std::to_string(exit_code))
+            + L" while probing "
+            + executable.wstring()
+        );
+    }
+    return output;
 }
 
 void start_detached_process(
@@ -852,6 +1294,388 @@ std::optional<fs::path> find_registered_python_install_dir(const LauncherConfig&
     return std::nullopt;
 }
 
+std::optional<PythonSourceOption> probe_python_source(
+    const fs::path& python_exe,
+    const ProjectLayout& layout,
+    const std::wstring& python_series,
+    const std::wstring& label_prefix,
+    PythonSourceKind kind
+) {
+    if (python_exe.empty()) {
+        return std::nullopt;
+    }
+    if (path_is_windows_apps_alias(python_exe)) {
+        append_log_line(layout.log_file, L"Skipping Windows App Execution Alias stub: " + python_exe.wstring());
+        return std::nullopt;
+    }
+    if (!path_exists_no_throw(python_exe)) {
+        return std::nullopt;
+    }
+
+    std::wstring output;
+    try {
+        output = run_process_capture(
+            python_exe,
+            {
+                L"-c",
+                L"import sys; print(sys.version.split()[0]); print(sys.executable)"
+            },
+            std::nullopt,
+            layout
+        );
+    } catch (const std::exception& exc) {
+        append_log_line(layout.log_file, L"Skipping Python probe for " + python_exe.wstring() + L": " + wide_from_utf8(exc.what()));
+        return std::nullopt;
+    }
+
+    const auto lines = split_lines(output);
+    if (lines.size() < 2) {
+        append_log_line(layout.log_file, L"Skipping Python probe with incomplete output: " + python_exe.wstring());
+        return std::nullopt;
+    }
+
+    const std::wstring version = trim_copy(lines[0]);
+    if (version.rfind(python_series, 0) != 0) {
+        return std::nullopt;
+    }
+
+    const fs::path resolved_python = fs::path(trim_copy(lines[1]));
+    PythonSourceOption option{};
+    option.kind = kind;
+    option.version = version;
+    option.python_exe = resolved_python;
+    option.pythonw_exe = resolved_python.parent_path() / "pythonw.exe";
+    option.description = resolved_python.wstring();
+    option.label = label_prefix + version + L"  (" + resolved_python.wstring() + L")";
+    return option;
+}
+
+std::vector<PythonSourceOption> discover_python_sources(const LauncherConfig& config, const ProjectLayout& layout) {
+    std::vector<PythonSourceOption> results;
+    auto append_unique = [&](const std::optional<PythonSourceOption>& candidate) {
+        if (!candidate.has_value()) {
+            return;
+        }
+        const std::wstring candidate_key = normalized_path_key(candidate->python_exe);
+        for (const auto& existing : results) {
+            if (normalized_path_key(existing.python_exe) == candidate_key) {
+                return;
+            }
+        }
+        results.push_back(*candidate);
+    };
+
+    for (const auto& conda_environment : discover_conda_environment_prefixes(layout)) {
+        auto option = probe_python_source(
+            conda_environment.second / "python.exe",
+            layout,
+            config.python_series,
+            L"Conda env " + conda_environment.first + L" - Python ",
+            PythonSourceKind::Existing
+        );
+        if (option.has_value()) {
+            option->is_conda = true;
+            option->conda_name = conda_environment.first;
+            option->description = L"Conda environment at " + conda_environment.second.wstring();
+            append_unique(option);
+        }
+    }
+
+    if (const auto py_launcher = find_executable_on_path(L"py.exe")) {
+        try {
+            const std::wstring listing = run_process_capture(*py_launcher, {L"-0p"}, std::nullopt, layout, true);
+            for (const auto& line : split_lines(listing)) {
+                std::wsmatch match;
+                const std::wregex path_pattern(LR"(([A-Za-z]:\\[^:\r\n]*python(?:w)?\.exe))", std::regex::icase);
+                if (std::regex_search(line, match, path_pattern) && match.size() > 1) {
+                    append_unique(
+                        probe_python_source(
+                            fs::path(match[1].str()),
+                            layout,
+                            config.python_series,
+                            L"Detected Python ",
+                            PythonSourceKind::Existing
+                        )
+                    );
+                }
+            }
+        } catch (const std::exception& exc) {
+            append_log_line(layout.log_file, L"Could not enumerate py.exe runtimes: " + wide_from_utf8(exc.what()));
+        }
+    }
+
+    if (const auto local_app_data = env_value(L"LOCALAPPDATA")) {
+        append_unique(
+            probe_python_source(
+                fs::path(*local_app_data) / "Programs" / "Python" / "Python312" / "python.exe",
+                layout,
+                config.python_series,
+                L"Detected Python ",
+                PythonSourceKind::Existing
+            )
+        );
+    }
+    append_unique(
+        probe_python_source(
+            fs::path(LR"(C:\Program Files)") / L"Python312\\python.exe",
+            layout,
+            config.python_series,
+            L"Detected Python ",
+            PythonSourceKind::Existing
+        )
+    );
+    if (const auto registry_install = find_registered_python_install_dir(config)) {
+        append_unique(probe_python_source(*registry_install / "python.exe", layout, config.python_series, L"Detected Python ", PythonSourceKind::Existing));
+    }
+    if (const auto path_python = find_executable_on_path(L"python.exe")) {
+        append_unique(probe_python_source(*path_python, layout, config.python_series, L"Detected Python ", PythonSourceKind::Existing));
+    }
+
+    std::sort(
+        results.begin(),
+        results.end(),
+        [](const PythonSourceOption& left, const PythonSourceOption& right) {
+            if (left.version != right.version) {
+                return version_less(right.version, left.version);
+            }
+            return lower_copy(left.python_exe.wstring()) < lower_copy(right.python_exe.wstring());
+        }
+    );
+
+    PythonSourceOption machine_install{};
+    machine_install.kind = PythonSourceKind::InstallMachine;
+    if (find_conda_executable().has_value()) {
+        machine_install.label = L"Create a new Python 3.12.x conda environment";
+        machine_install.description = L"Conda is installed, so the launcher will create or update a named conda environment.";
+    } else {
+        machine_install.label = L"Install Python 3.12.x on this machine";
+        machine_install.description = L"Downloads the official installer and registers Python for this user.";
+    }
+    results.push_back(machine_install);
+
+    PythonSourceOption portable{};
+    portable.kind = PythonSourceKind::Portable;
+    portable.label = L"Use the portable runtime inside the runtime folder";
+    portable.description = L"Keeps the launcher self-contained and does not depend on a machine-wide Python install.";
+    results.push_back(portable);
+
+    return results;
+}
+
+std::vector<fs::path> discover_script_options(const ProjectLayout& layout) {
+    std::vector<fs::path> scripts;
+    std::error_code iter_error;
+    for (fs::directory_iterator it(layout.project_root, fs::directory_options::skip_permission_denied, iter_error);
+         it != fs::directory_iterator();
+         it.increment(iter_error)) {
+        if (iter_error) {
+            iter_error.clear();
+            continue;
+        }
+        if (!it->is_regular_file(iter_error)) {
+            if (iter_error) {
+                iter_error.clear();
+            }
+            continue;
+        }
+        const fs::path path = it->path();
+        if (lower_copy(path.extension().wstring()) == L".py") {
+            scripts.push_back(path.filename());
+        }
+    }
+
+    std::sort(
+        scripts.begin(),
+        scripts.end(),
+        [](const fs::path& left, const fs::path& right) {
+            if (lower_copy(left.filename().wstring()) == L"run.py") {
+                return true;
+            }
+            if (lower_copy(right.filename().wstring()) == L"run.py") {
+                return false;
+            }
+            return lower_copy(left.filename().wstring()) < lower_copy(right.filename().wstring());
+        }
+    );
+    return scripts;
+}
+
+std::optional<RunConfig> load_run_config(const ProjectLayout& layout) {
+    if (!fs::exists(layout.run_config_file)) {
+        return std::nullopt;
+    }
+    const std::wstring xml = read_text_file_utf8(layout.run_config_file);
+    const auto launcher_attributes = xml_element_attributes(xml, L"launcher");
+    const auto python_attributes = xml_element_attributes(xml, L"python");
+    const auto torch_attributes = xml_element_attributes(xml, L"torch");
+    const auto launch_attributes = xml_element_attributes(xml, L"launch");
+    const auto requirements_attributes = xml_element_attributes(xml, L"requirements");
+    if (!launcher_attributes.has_value() || !python_attributes.has_value() || !torch_attributes.has_value()
+        || !launch_attributes.has_value() || !requirements_attributes.has_value()) {
+        return std::nullopt;
+    }
+
+    RunConfig run_config{};
+    try {
+        run_config.schema_version = std::stoi(xml_attribute_value(*launcher_attributes, L"schema").value_or(L"0"));
+    } catch (...) {
+        return std::nullopt;
+    }
+    if (run_config.schema_version != 2) {
+        return std::nullopt;
+    }
+
+    const std::wstring source_kind = xml_attribute_value(*python_attributes, L"source_kind").value_or(L"");
+    if (source_kind == L"existing") {
+        run_config.python_source_kind = PythonSourceKind::Existing;
+    } else if (source_kind == L"install-machine") {
+        run_config.python_source_kind = PythonSourceKind::InstallMachine;
+    } else if (source_kind == L"portable") {
+        run_config.python_source_kind = PythonSourceKind::Portable;
+    } else {
+        return std::nullopt;
+    }
+
+    const std::wstring environment_kind = xml_attribute_value(*python_attributes, L"environment_kind").value_or(L"");
+    if (environment_kind == L"direct") {
+        run_config.environment_kind = EnvironmentKind::Direct;
+    } else if (environment_kind == L"named-venv") {
+        run_config.environment_kind = EnvironmentKind::NamedVenv;
+    } else if (environment_kind == L"named-conda") {
+        run_config.environment_kind = EnvironmentKind::NamedConda;
+    } else if (environment_kind == L"portable") {
+        run_config.environment_kind = EnvironmentKind::PortableRuntime;
+    } else {
+        return std::nullopt;
+    }
+
+    const std::wstring accelerator_kind = xml_attribute_value(*torch_attributes, L"kind").value_or(L"");
+    if (accelerator_kind == L"cuda") {
+        run_config.accelerator_kind = AcceleratorKind::NvidiaCuda;
+    } else if (accelerator_kind == L"rocm") {
+        run_config.accelerator_kind = AcceleratorKind::AmdRocm;
+    } else if (accelerator_kind == L"xpu") {
+        run_config.accelerator_kind = AcceleratorKind::IntelArcXpu;
+    } else if (accelerator_kind == L"cpu") {
+        run_config.accelerator_kind = AcceleratorKind::Cpu;
+    } else {
+        return std::nullopt;
+    }
+
+    const std::wstring launch_kind = xml_attribute_value(*launch_attributes, L"kind").value_or(L"");
+    if (launch_kind == L"script") {
+        run_config.launch_kind = LaunchKind::Script;
+    } else if (launch_kind == L"python-args") {
+        run_config.launch_kind = LaunchKind::PythonArgs;
+    } else {
+        return std::nullopt;
+    }
+
+    run_config.python_version = xml_attribute_value(*python_attributes, L"version").value_or(L"");
+    run_config.python_source_label = xml_attribute_value(*python_attributes, L"source_label").value_or(L"");
+    run_config.python_source_path = xml_attribute_value(*python_attributes, L"source_path").value_or(L"");
+    run_config.python_sourcew_path = xml_attribute_value(*python_attributes, L"sourcew_path").value_or(L"");
+    run_config.environment_name = xml_attribute_value(*python_attributes, L"environment_name").value_or(L"");
+    run_config.environment_path = xml_attribute_value(*python_attributes, L"environment_path").value_or(L"");
+    run_config.launch_target = xml_attribute_value(*launch_attributes, L"target").value_or(L"");
+    run_config.requirements_hash = xml_attribute_value(*requirements_attributes, L"hash").value_or(L"");
+    run_config.requirements_synced_at = xml_attribute_value(*requirements_attributes, L"synced_at").value_or(L"");
+    return run_config;
+}
+
+void write_run_config(const ProjectLayout& layout, const RunConfig& run_config) {
+    const auto python_source_kind = [&]() {
+        switch (run_config.python_source_kind) {
+        case PythonSourceKind::Existing:
+            return L"existing";
+        case PythonSourceKind::InstallMachine:
+            return L"install-machine";
+        case PythonSourceKind::Portable:
+            return L"portable";
+        }
+        return L"portable";
+    }();
+    const auto environment_kind = [&]() {
+        switch (run_config.environment_kind) {
+        case EnvironmentKind::Direct:
+            return L"direct";
+        case EnvironmentKind::NamedVenv:
+            return L"named-venv";
+        case EnvironmentKind::NamedConda:
+            return L"named-conda";
+        case EnvironmentKind::PortableRuntime:
+            return L"portable";
+        }
+        return L"portable";
+    }();
+    const auto accelerator_kind = [&]() {
+        switch (run_config.accelerator_kind) {
+        case AcceleratorKind::NvidiaCuda:
+            return L"cuda";
+        case AcceleratorKind::IntelArcXpu:
+            return L"xpu";
+        case AcceleratorKind::AmdRocm:
+            return L"rocm";
+        case AcceleratorKind::Cpu:
+            return L"cpu";
+        }
+        return L"cpu";
+    }();
+    const auto launch_kind = run_config.launch_kind == LaunchKind::Script ? L"script" : L"python-args";
+
+    const std::wstring xml =
+        L"<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n"
+        L"<launcher-config>\r\n"
+        L"  <launcher schema=\"2\"/>\r\n"
+        L"  <python"
+        L" source_kind=\"" + xml_escape(python_source_kind) + L"\""
+        L" source_label=\"" + xml_escape(run_config.python_source_label) + L"\""
+        L" source_path=\"" + xml_escape(run_config.python_source_path.wstring()) + L"\""
+        L" sourcew_path=\"" + xml_escape(run_config.python_sourcew_path.wstring()) + L"\""
+        L" version=\"" + xml_escape(run_config.python_version) + L"\""
+        L" environment_kind=\"" + xml_escape(environment_kind) + L"\""
+        L" environment_name=\"" + xml_escape(run_config.environment_name) + L"\""
+        L" environment_path=\"" + xml_escape(run_config.environment_path.wstring()) + L"\""
+        L"/>\r\n"
+        L"  <torch kind=\"" + xml_escape(accelerator_kind) + L"\"/>\r\n"
+        L"  <launch kind=\"" + xml_escape(launch_kind) + L"\" target=\"" + xml_escape(run_config.launch_target) + L"\"/>\r\n"
+        L"  <requirements hash=\"" + xml_escape(run_config.requirements_hash) + L"\" synced_at=\"" + xml_escape(run_config.requirements_synced_at) + L"\"/>\r\n"
+        L"</launcher-config>\r\n";
+    write_text_file_utf8(layout.run_config_file, utf8_from_wide(xml));
+}
+
+bool run_config_is_usable(const RunConfig& run_config, const ProjectLayout& layout) {
+    if (run_config.launch_kind == LaunchKind::Script) {
+        if (run_config.launch_target.empty() || !path_exists_no_throw(layout.project_root / run_config.launch_target)) {
+            return false;
+        }
+    } else if (trim_copy(run_config.launch_target).empty()) {
+        return false;
+    }
+
+    if (run_config.python_source_kind == PythonSourceKind::Existing
+        && (path_is_windows_apps_alias(run_config.python_source_path) || !path_exists_no_throw(run_config.python_source_path))) {
+        return false;
+    }
+    if ((run_config.environment_kind == EnvironmentKind::NamedVenv
+            || run_config.environment_kind == EnvironmentKind::NamedConda)
+        && trim_copy(run_config.environment_name).empty()) {
+        return false;
+    }
+    return true;
+}
+
+void configure_active_python(
+    ProjectLayout& layout,
+    const fs::path& python_exe,
+    const fs::path& pythonw_exe,
+    const std::optional<fs::path>& environment_dir
+) {
+    layout.active_python_exe = python_exe;
+    layout.active_pythonw_exe = pythonw_exe;
+    layout.active_environment_dir = environment_dir.value_or(fs::path());
+}
+
 bool paths_equivalent_loose(const fs::path& left, const fs::path& right) {
     std::error_code exists_error;
     if (fs::exists(left, exists_error) && fs::exists(right, exists_error)) {
@@ -1023,12 +1847,8 @@ AcceleratorChoice detect_accelerator(const LauncherConfig& config, const Project
     const bool has_nvidia_driver = has_nvidia_adapter || command_exists_on_path(L"nvidia-smi.exe")
         || fs::exists(LR"(C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe)");
     if (has_nvidia_driver) {
-        AcceleratorChoice choice;
-        choice.kind = AcceleratorKind::NvidiaCuda;
-        choice.display_name = L"NVIDIA CUDA";
-        choice.install_tag = L"nvidia-cu129";
-        choice.index_url = config.torch_cuda_index_url;
-        choice.note = L"NVIDIA driver detected. Installing the CUDA wheel set from the official cu129 index.";
+        AcceleratorChoice choice = accelerator_choice_for_kind(config, AcceleratorKind::NvidiaCuda);
+        choice.note = L"NVIDIA driver detected. Preselecting the CUDA wheel set.";
         return choice;
     }
 
@@ -1040,12 +1860,8 @@ AcceleratorChoice detect_accelerator(const LauncherConfig& config, const Project
         }
     );
     if (has_intel_arc) {
-        AcceleratorChoice choice;
-        choice.kind = AcceleratorKind::IntelArcXpu;
-        choice.display_name = L"Intel Arc / XPU";
-        choice.install_tag = L"intel-xpu";
-        choice.index_url = config.torch_xpu_index_url;
-        choice.note = L"Intel Arc adapter detected. Installing the official PyTorch XPU wheels.";
+        AcceleratorChoice choice = accelerator_choice_for_kind(config, AcceleratorKind::IntelArcXpu);
+        choice.note = L"Intel Arc adapter detected. Preselecting the official PyTorch XPU wheels.";
         return choice;
     }
 
@@ -1063,20 +1879,44 @@ AcceleratorChoice detect_accelerator(const LauncherConfig& config, const Project
         || fs::exists(LR"(C:\Program Files\AMD\ROCm)")
         || fs::exists(LR"(C:\Program Files\AMD\HIP)");
     if (has_amd_adapter && has_rocm_markers) {
-        AcceleratorChoice choice;
-        choice.kind = AcceleratorKind::AmdRocmDetected;
-        choice.display_name = L"AMD ROCm detected";
-        choice.install_tag = L"amd-rocm-fallback-cpu";
-        choice.note =
-            L"AMD ROCm markers were detected, but the official native Windows PyTorch wheels currently do not provide a documented ROCm install path. Falling back to the CPU wheels for this launcher.";
+        AcceleratorChoice choice = accelerator_choice_for_kind(config, AcceleratorKind::AmdRocm);
+        choice.note = L"AMD ROCm markers were detected. Preselecting the ROCm wheel index.";
         return choice;
     }
 
-    AcceleratorChoice choice;
-    choice.kind = AcceleratorKind::Cpu;
-    choice.display_name = L"CPU";
-    choice.install_tag = L"cpu";
+    AcceleratorChoice choice = accelerator_choice_for_kind(config, AcceleratorKind::Cpu);
     choice.note = L"No supported accelerator driver was detected. Installing the regular CPU wheels.";
+    return choice;
+}
+
+AcceleratorChoice accelerator_choice_for_kind(const LauncherConfig& config, AcceleratorKind kind) {
+    AcceleratorChoice choice{};
+    choice.kind = kind;
+    switch (kind) {
+    case AcceleratorKind::NvidiaCuda:
+        choice.display_name = L"NVIDIA CUDA";
+        choice.install_tag = L"nvidia-cu129";
+        choice.index_url = config.torch_cuda_index_url;
+        choice.note = L"Installing the CUDA wheel set from the configured cu129 index.";
+        break;
+    case AcceleratorKind::IntelArcXpu:
+        choice.display_name = L"Intel XPU";
+        choice.install_tag = L"intel-xpu";
+        choice.index_url = config.torch_xpu_index_url;
+        choice.note = L"Installing the official XPU wheels.";
+        break;
+    case AcceleratorKind::AmdRocm:
+        choice.display_name = L"AMD ROCm";
+        choice.install_tag = L"amd-rocm";
+        choice.index_url = config.torch_rocm_index_url;
+        choice.note = L"Installing the ROCm wheels from the configured ROCm index.";
+        break;
+    case AcceleratorKind::Cpu:
+        choice.display_name = L"CPU";
+        choice.install_tag = L"cpu";
+        choice.note = L"Installing the regular CPU wheels.";
+        break;
+    }
     return choice;
 }
 
@@ -1335,10 +2175,39 @@ void write_embeddable_runtime_pth(const LauncherConfig& config, const ProjectLay
 }
 
 void set_child_environment(const ProjectLayout& layout) {
-    std::wstring path_prefix = (layout.python_env_dir / "Scripts").wstring() + L";" + layout.python_env_dir.wstring();
+    std::wstring path_prefix;
+    std::vector<fs::path> path_entries;
+    if (!layout.active_python_exe.empty()) {
+        const fs::path python_dir = layout.active_python_exe.parent_path();
+        if (lower_copy(python_dir.filename().wstring()) == L"scripts") {
+            path_entries.push_back(python_dir);
+            const fs::path env_root = python_dir.parent_path();
+            if (!env_root.empty() && !paths_equivalent_loose(env_root, python_dir)) {
+                path_entries.push_back(env_root);
+            }
+        } else {
+            path_entries.push_back(python_dir);
+            const fs::path scripts_dir = python_dir / "Scripts";
+            if (path_exists_no_throw(scripts_dir) && !paths_equivalent_loose(scripts_dir, python_dir)) {
+                path_entries.push_back(scripts_dir);
+            }
+        }
+    }
+    for (const auto& entry : path_entries) {
+        if (entry.empty()) {
+            continue;
+        }
+        if (!path_prefix.empty()) {
+            path_prefix += L";";
+        }
+        path_prefix += entry.wstring();
+    }
     const auto current_path = env_value(L"PATH").value_or(L"");
     if (!current_path.empty()) {
-        path_prefix += L";" + current_path;
+        if (!path_prefix.empty()) {
+            path_prefix += L";";
+        }
+        path_prefix += current_path;
     }
     SetEnvironmentVariableW(L"PATH", path_prefix.c_str());
     SetEnvironmentVariableW(L"PYTHONNOUSERSITE", L"1");
@@ -1367,7 +2236,7 @@ bool python_supports_launcher_runtime(const fs::path& python_exe, const fs::path
     }
     const int exit_code = run_process(
         python_exe,
-        {L"-c", L"import ensurepip, tkinter, venv, sys; sys.stdout.write('launcher-runtime-ok')"},
+        {L"-c", L"import ensurepip, venv, sys; sys.stdout.write('launcher-runtime-ok')"},
         std::nullopt,
         log_file,
         true
@@ -1389,27 +2258,67 @@ bool python_has_importable_torch_stack(const fs::path& python_exe, const fs::pat
     return exit_code == 0;
 }
 
-void create_local_venv(const fs::path& base_python_exe, const ProjectLayout& layout) {
-    if (fs::exists(layout.python_env_dir)) {
-        fs::remove_all(layout.python_env_dir);
+void create_virtual_environment(const fs::path& base_python_exe, const fs::path& environment_dir, const ProjectLayout& layout) {
+    if (fs::exists(environment_dir)) {
+        fs::remove_all(environment_dir);
     }
-    append_log_line(layout.log_file, L"Creating local virtual environment in " + layout.python_env_dir.wstring());
+    append_log_line(layout.log_file, L"Creating project environment in " + environment_dir.wstring());
     const int exit_code = run_process(
         base_python_exe,
-        {L"-m", L"venv", layout.python_env_dir.wstring(), L"--clear"},
+        {L"-m", L"venv", environment_dir.wstring(), L"--clear"},
         layout.project_root,
         layout.log_file,
         true
     );
     if (exit_code != 0) {
         throw make_error(
-            L"Could not create the local Python environment (exit code "
+            L"Could not create the project Python environment (exit code "
             + wide_from_utf8(std::to_string(exit_code))
             + L")."
         );
     }
-    fail_if(!fs::exists(layout.python_exe), L"Virtual environment was created, but python.exe is missing in " + layout.python_env_dir.wstring());
-    fail_if(!fs::exists(layout.pythonw_exe), L"Virtual environment was created, but pythonw.exe is missing in " + layout.python_env_dir.wstring());
+
+    const fs::path python_exe = environment_dir / "Scripts" / "python.exe";
+    const fs::path pythonw_exe = environment_dir / "Scripts" / "pythonw.exe";
+    fail_if(!fs::exists(python_exe), L"Virtual environment was created, but python.exe is missing in " + environment_dir.wstring());
+    if (!fs::exists(pythonw_exe)) {
+        append_log_line(layout.log_file, L"pythonw.exe is not present in " + environment_dir.wstring() + L". Falling back to python.exe for launches.");
+    }
+}
+
+void create_local_venv(const fs::path& base_python_exe, const ProjectLayout& layout) {
+    create_virtual_environment(base_python_exe, layout.python_env_dir, layout);
+}
+
+void create_or_update_conda_environment(const ProjectLayout& layout, const std::wstring& environment_name, const std::wstring& python_version) {
+    const auto conda_exe = find_conda_executable();
+    fail_if(!conda_exe.has_value(), L"Conda is required for this environment selection, but conda.exe was not found.");
+
+    const std::wstring sanitized_name = sanitize_environment_name(environment_name);
+    fail_if(sanitized_name.empty(), L"Provide a valid conda environment name.");
+
+    const auto existing_prefix = find_conda_environment_prefix(layout, sanitized_name);
+    const bool exists = existing_prefix.has_value();
+    append_log_line(
+        layout.log_file,
+        (exists ? L"Updating conda environment " : L"Creating conda environment ")
+        + sanitized_name
+        + L" with Python "
+        + python_version
+    );
+
+    std::vector<std::wstring> arguments = exists
+        ? std::vector<std::wstring>{L"install", L"--yes", L"--name", sanitized_name, L"python=" + python_version, L"pip"}
+        : std::vector<std::wstring>{L"create", L"--yes", L"--name", sanitized_name, L"python=" + python_version, L"pip"};
+    const int exit_code = run_process(*conda_exe, arguments, std::nullopt, layout.log_file, true);
+    fail_if(
+        exit_code != 0,
+        L"Conda failed while preparing environment "
+        + sanitized_name
+        + L" (exit code "
+        + wide_from_utf8(std::to_string(exit_code))
+        + L")."
+    );
 }
 
 void repair_base_python(const ProjectLayout& layout) {
@@ -1501,7 +2410,7 @@ void install_base_python(const LauncherConfig& config, const ProjectLayout& layo
         );
         fail_if(
             !python_supports_launcher_runtime(layout.python_base_exe, layout.log_file),
-            L"The embeddable Python runtime is missing one or more required modules (tkinter, ensurepip, or venv)."
+            L"The embeddable Python runtime is missing one or more required modules (ensurepip or venv)."
         );
         append_log_line(layout.log_file, L"Embeddable Python runtime is ready.");
     } catch (const std::exception& exc) {
@@ -1511,6 +2420,52 @@ void install_base_python(const LauncherConfig& config, const ProjectLayout& layo
         );
         append_log_line(layout.log_file, wide_from_utf8(exc.what()));
         throw;
+    }
+}
+
+void install_machine_python(const LauncherConfig& config, const ProjectLayout& layout, const std::wstring& python_version) {
+    fs::create_directories(layout.cache_dir);
+    fs::create_directories(layout.logs_dir);
+
+    const std::wstring installer_url = python_installer_url_for_version(config, python_version);
+    download_file(installer_url, layout.python_installer_file, layout.log_file);
+    if (fs::exists(layout.python_installer_log_file)) {
+        fs::remove(layout.python_installer_log_file);
+    }
+
+    append_log_line(layout.log_file, L"Installing Python " + python_version + L" for the current Windows user.");
+    const int exit_code = run_process(
+        layout.python_installer_file,
+        {
+            L"/quiet",
+            L"/log", layout.python_installer_log_file.wstring(),
+            L"InstallAllUsers=0",
+            L"InstallLauncherAllUsers=0",
+            L"AssociateFiles=0",
+            L"Include_launcher=1",
+            L"Include_pip=1",
+            L"Include_tcltk=1",
+            L"Include_test=0",
+            L"Include_doc=0",
+            L"Include_dev=0",
+            L"Include_symbols=0",
+            L"Include_debug=0",
+            L"PrependPath=0",
+            L"Shortcuts=0"
+        },
+        std::nullopt,
+        layout.log_file,
+        true
+    );
+    fail_if(
+        exit_code != 0 && exit_code != 3010,
+        L"Python machine install failed with exit code "
+        + wide_from_utf8(std::to_string(exit_code))
+        + L". See "
+        + layout.python_installer_log_file.wstring()
+    );
+    if (exit_code == 3010) {
+        append_log_line(layout.log_file, L"Python installer reported that a reboot may be required, but the install completed.");
     }
 }
 
@@ -1560,7 +2515,8 @@ void ensure_python_runtime(const LauncherConfig& config, const ProjectLayout& la
 }
 
 void run_python(const ProjectLayout& layout, const std::vector<std::wstring>& arguments, const std::optional<fs::path>& cwd) {
-    const int exit_code = run_process(layout.python_exe, arguments, cwd, layout.log_file, true);
+    const fs::path python_exe = !layout.active_python_exe.empty() ? layout.active_python_exe : layout.python_exe;
+    const int exit_code = run_process(python_exe, arguments, cwd, layout.log_file, true);
     if (exit_code != 0) {
         throw make_error(L"Python command failed with exit code " + wide_from_utf8(std::to_string(exit_code)) + L". See " + layout.log_file.wstring());
     }
@@ -1568,7 +2524,18 @@ void run_python(const ProjectLayout& layout, const std::vector<std::wstring>& ar
 
 void ensure_packaging_tools(const ProjectLayout& layout) {
     append_log_line(layout.log_file, L"Bootstrapping pip, setuptools, and wheel.");
-    run_python(layout, {L"-m", L"ensurepip", L"--upgrade"}, std::nullopt);
+    const fs::path python_exe = !layout.active_python_exe.empty() ? layout.active_python_exe : layout.python_exe;
+    const int pip_check_exit = run_process(
+        python_exe,
+        {L"-m", L"pip", L"--version"},
+        std::nullopt,
+        layout.log_file,
+        true
+    );
+    if (pip_check_exit != 0) {
+        append_log_line(layout.log_file, L"pip is not ready yet. Attempting ensurepip.");
+        run_python(layout, {L"-m", L"ensurepip", L"--upgrade"}, std::nullopt);
+    }
     run_python(
         layout,
         {
@@ -1666,8 +2633,9 @@ std::vector<std::wstring> pip_install_arguments(
 
 void uninstall_torch_packages(const ProjectLayout& layout) {
     append_log_line(layout.log_file, L"Removing previously installed torch packages so the runtime can switch variants cleanly.");
+    const fs::path python_exe = !layout.active_python_exe.empty() ? layout.active_python_exe : layout.python_exe;
     const int exit_code = run_process(
-        layout.python_exe,
+        python_exe,
         {
             L"-m", L"pip", L"uninstall",
             L"-y",
@@ -1686,7 +2654,8 @@ void uninstall_torch_packages(const ProjectLayout& layout) {
 
 void install_torch_stack(const ProjectLayout& layout, const AcceleratorChoice& accelerator) {
     const std::wstring previous_target = trim_copy(read_text_file_utf8(layout.torch_target_file));
-    if (previous_target == accelerator.install_tag && python_has_importable_torch_stack(layout.python_exe, layout.log_file)) {
+    const fs::path python_exe = !layout.active_python_exe.empty() ? layout.active_python_exe : layout.python_exe;
+    if (previous_target == accelerator.install_tag && python_has_importable_torch_stack(python_exe, layout.log_file)) {
         append_log_line(
             layout.log_file,
             L"Torch stack for " + accelerator.display_name + L" is already installed and importable. Skipping reinstall."
@@ -1706,30 +2675,17 @@ void install_torch_stack(const ProjectLayout& layout, const AcceleratorChoice& a
         );
     };
 
-    if (accelerator.kind == AcceleratorKind::AmdRocmDetected) {
-        append_log_line(layout.log_file, accelerator.note);
+    append_log_line(layout.log_file, accelerator.note);
+    if (accelerator.index_url.has_value()) {
+        install_packages(accelerator.index_url, L"Installing the " + accelerator.display_name + L" torch stack.");
+    } else {
         install_packages(std::nullopt, L"Installing the regular CPU torch stack.");
-        write_text_file_utf8(layout.torch_target_file, utf8_from_wide(accelerator.install_tag + L"\n"));
-        return;
     }
-
-    try {
-        if (accelerator.index_url.has_value()) {
-            install_packages(accelerator.index_url, L"Installing the " + accelerator.display_name + L" torch stack.");
-        } else {
-            install_packages(std::nullopt, L"Installing the regular CPU torch stack.");
-        }
-        write_text_file_utf8(layout.torch_target_file, utf8_from_wide(accelerator.install_tag + L"\n"));
-    } catch (const std::exception& exc) {
-        if (accelerator.kind == AcceleratorKind::Cpu) {
-            throw;
-        }
-        append_log_line(layout.log_file, L"Accelerator-specific torch install failed. Falling back to the regular CPU wheels.");
-        append_log_line(layout.log_file, wide_from_utf8(exc.what()));
-        uninstall_torch_packages(layout);
-        install_packages(std::nullopt, L"Installing CPU torch wheels after fallback.");
-        write_text_file_utf8(layout.torch_target_file, utf8_from_wide(L"cpu-fallback\n"));
-    }
+    fail_if(
+        !python_has_importable_torch_stack(python_exe, layout.log_file),
+        L"The selected torch stack did not import successfully after installation."
+    );
+    write_text_file_utf8(layout.torch_target_file, utf8_from_wide(accelerator.install_tag + L"\n"));
 }
 
 void install_project_requirements(const ProjectLayout& layout) {
@@ -1752,13 +2708,52 @@ void install_project_requirements(const ProjectLayout& layout) {
     );
 }
 
-void launch_run_script(const ProjectLayout& layout, const std::vector<std::wstring>& extra_args) {
+RequirementsSnapshot collect_requirements_snapshot(const ProjectLayout& layout) {
+    RequirementsSnapshot snapshot{};
+    snapshot.filtered_file = prepare_filtered_requirements(layout);
+    if (snapshot.filtered_file.has_value()) {
+        snapshot.hash = hash_text_utf8(read_text_file_utf8(*snapshot.filtered_file));
+    }
+    return snapshot;
+}
+
+void sync_project_requirements(const ProjectLayout& layout, RunConfig& run_config) {
+    const RequirementsSnapshot snapshot = collect_requirements_snapshot(layout);
+    if (snapshot.hash == run_config.requirements_hash) {
+        append_log_line(layout.log_file, L"requirements.txt has not changed since the last successful sync.");
+        return;
+    }
+    if (!snapshot.filtered_file.has_value()) {
+        run_config.requirements_hash.clear();
+        run_config.requirements_synced_at = current_timestamp_local();
+        append_log_line(layout.log_file, L"No non-torch requirements need syncing.");
+        return;
+    }
+
+    install_project_requirements(layout);
+    run_config.requirements_hash = snapshot.hash;
+    run_config.requirements_synced_at = current_timestamp_local();
+}
+
+void launch_selected_target(const ProjectLayout& layout, const RunConfig& run_config, const std::vector<std::wstring>& extra_args) {
     std::vector<std::wstring> arguments;
-    arguments.push_back(layout.run_script.wstring());
+    if (run_config.launch_kind == LaunchKind::Script) {
+        arguments.push_back((layout.project_root / run_config.launch_target).wstring());
+    } else {
+        arguments = split_command_line(run_config.launch_target);
+        fail_if(arguments.empty(), L"The saved custom Python command is empty.");
+    }
     arguments.insert(arguments.end(), extra_args.begin(), extra_args.end());
 
-    const fs::path preferred_python = fs::exists(layout.pythonw_exe) ? layout.pythonw_exe : layout.python_exe;
-    append_log_line(layout.log_file, L"Launching " + layout.run_script.wstring() + L" with " + preferred_python.wstring());
+    const fs::path preferred_python = fs::exists(layout.active_pythonw_exe) ? layout.active_pythonw_exe : layout.active_python_exe;
+    fail_if(preferred_python.empty(), L"The selected Python environment is not ready.");
+    append_log_line(
+        layout.log_file,
+        L"Launching "
+        + (run_config.launch_kind == LaunchKind::Script ? run_config.launch_target : run_config.launch_target)
+        + L" with "
+        + preferred_python.wstring()
+    );
     start_detached_process(preferred_python, arguments, layout.project_root, true);
 }
 
@@ -1766,18 +2761,7 @@ ProjectLayout resolve_project_layout(const LauncherConfig& config) {
     ProjectLayout layout{};
     const fs::path exe_path = executable_path();
     layout.launcher_dir = exe_path.parent_path();
-
-    fs::path cursor = layout.launcher_dir;
-    while (true) {
-        if (fs::exists(cursor / "run.py")) {
-    layout.project_root = cursor;
-            break;
-        }
-        if (cursor == cursor.root_path()) {
-            throw make_error(L"Could not find run.py. Place launch.exe in the project root or a subfolder below it.");
-        }
-        cursor = cursor.parent_path();
-    }
+    layout.project_root = layout.launcher_dir;
 
     layout.runtime_dir = layout.project_root / config.runtime_dir_name;
     layout.cache_dir = layout.runtime_dir / config.cache_dir_name;
@@ -1798,46 +2782,411 @@ ProjectLayout resolve_project_layout(const LauncherConfig& config) {
     layout.python_embeddable_file = layout.cache_dir / "python-runtime-embed.zip";
     layout.python_installer_log_file = layout.logs_dir / "python-installer.log";
     layout.requirements_file = layout.project_root / "requirements.txt";
+    layout.run_config_file = layout.project_root / "run.cfg";
+    layout.envs_dir = layout.runtime_dir / "envs";
     layout.run_script = layout.project_root / "run.py";
     layout.pip_cache_dir = layout.cache_dir / "pip";
+    layout.active_python_exe = layout.python_exe;
+    layout.active_pythonw_exe = layout.pythonw_exe;
+    layout.active_environment_dir = layout.python_env_dir;
 
     fs::create_directories(layout.runtime_dir);
     fs::create_directories(layout.cache_dir);
     fs::create_directories(layout.logs_dir);
     fs::create_directories(layout.pip_cache_dir);
+    fs::create_directories(layout.envs_dir);
     return layout;
+}
+
+std::wstring window_text(HWND control) {
+    const int length = GetWindowTextLengthW(control);
+    if (length <= 0) {
+        return L"";
+    }
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    GetWindowTextW(control, text.data(), length + 1);
+    if (!text.empty() && text.back() == L'\0') {
+        text.pop_back();
+    }
+    return trim_copy(text);
+}
+
+RunConfig collect_run_config_from_controls(HWND hwnd, const WindowState& state) {
+    const LRESULT selected_index = SendMessageW(state.python_source_combo, CB_GETCURSEL, 0, 0);
+    fail_if(selected_index == CB_ERR, L"Select a Python 3.12.x source before launching.");
+    fail_if(selected_index < 0 || static_cast<size_t>(selected_index) >= state.python_sources.size(), L"Invalid Python source selection.");
+
+    const PythonSourceOption& selected_source = state.python_sources[static_cast<size_t>(selected_index)];
+    RunConfig run_config{};
+    run_config.python_source_kind = selected_source.kind;
+    run_config.python_source_label = selected_source.label;
+    run_config.python_source_path = selected_source.python_exe;
+    run_config.python_sourcew_path = selected_source.pythonw_exe;
+    run_config.python_version = !selected_source.version.empty() ? selected_source.version : state.config.fallback_python_version;
+
+    if (selected_source.kind == PythonSourceKind::Portable) {
+        run_config.environment_kind = EnvironmentKind::PortableRuntime;
+        run_config.environment_name = state.config.python_env_dir_name;
+        run_config.environment_path = state.layout.python_env_dir;
+    } else if (selected_source.kind == PythonSourceKind::InstallMachine && state.conda_available) {
+        run_config.environment_kind = EnvironmentKind::NamedConda;
+        run_config.environment_name = window_text(state.environment_name_edit);
+        if (run_config.environment_name.empty()) {
+            run_config.environment_name = default_environment_name(state.layout);
+        }
+    } else if (IsDlgButtonChecked(hwnd, kControlEnvironmentDirect) == BST_CHECKED) {
+        run_config.environment_kind = EnvironmentKind::Direct;
+    } else {
+        run_config.environment_kind = state.conda_available ? EnvironmentKind::NamedConda : EnvironmentKind::NamedVenv;
+        run_config.environment_name = window_text(state.environment_name_edit);
+        if (run_config.environment_name.empty()) {
+            run_config.environment_name = default_environment_name(state.layout);
+        }
+    }
+
+    if (IsDlgButtonChecked(hwnd, kControlTorchCuda) == BST_CHECKED) {
+        run_config.accelerator_kind = AcceleratorKind::NvidiaCuda;
+    } else if (IsDlgButtonChecked(hwnd, kControlTorchRocm) == BST_CHECKED) {
+        run_config.accelerator_kind = AcceleratorKind::AmdRocm;
+    } else if (IsDlgButtonChecked(hwnd, kControlTorchXpu) == BST_CHECKED) {
+        run_config.accelerator_kind = AcceleratorKind::IntelArcXpu;
+    } else {
+        run_config.accelerator_kind = AcceleratorKind::Cpu;
+    }
+
+    const bool use_custom_command = state.script_options.empty() || IsDlgButtonChecked(hwnd, kControlLaunchCustom) == BST_CHECKED;
+    if (use_custom_command) {
+        run_config.launch_kind = LaunchKind::PythonArgs;
+        run_config.launch_target = window_text(state.custom_command_edit);
+        fail_if(run_config.launch_target.empty(), L"Type a Python command or module to execute.");
+    } else {
+        const LRESULT script_index = SendMessageW(state.script_combo, CB_GETCURSEL, 0, 0);
+        fail_if(script_index == CB_ERR, L"Select a Python script to launch.");
+        fail_if(script_index < 0 || static_cast<size_t>(script_index) >= state.script_options.size(), L"Invalid script selection.");
+        run_config.launch_kind = LaunchKind::Script;
+        run_config.launch_target = state.script_options[static_cast<size_t>(script_index)].wstring();
+    }
+
+    return run_config;
+}
+
+void update_setup_controls(HWND hwnd) {
+    auto* state = reinterpret_cast<WindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!state) {
+        return;
+    }
+
+    LRESULT selected_index = SendMessageW(state->python_source_combo, CB_GETCURSEL, 0, 0);
+    if (selected_index == CB_ERR && !state->python_sources.empty()) {
+        selected_index = 0;
+        SendMessageW(state->python_source_combo, CB_SETCURSEL, 0, 0);
+    }
+
+    if (!state->python_sources.empty() && selected_index != CB_ERR) {
+        const PythonSourceOption& source = state->python_sources[static_cast<size_t>(selected_index)];
+        std::wstring note = source.description;
+        if (source.kind == PythonSourceKind::Portable) {
+            note += L"\r\nThe launcher will manage the portable runtime in the runtime folder automatically.";
+            ShowWindow(state->environment_direct_radio, SW_HIDE);
+            ShowWindow(state->environment_named_radio, SW_HIDE);
+            ShowWindow(state->environment_name_label, SW_HIDE);
+            ShowWindow(state->environment_name_edit, SW_HIDE);
+        } else if (source.kind == PythonSourceKind::InstallMachine && state->conda_available) {
+            if (window_text(state->environment_name_edit).empty()) {
+                SetWindowTextW(state->environment_name_edit, default_environment_name(state->layout).c_str());
+            }
+            ShowWindow(state->environment_direct_radio, SW_HIDE);
+            ShowWindow(state->environment_named_radio, SW_HIDE);
+            ShowWindow(state->environment_name_label, SW_SHOW);
+            ShowWindow(state->environment_name_edit, SW_SHOW);
+            note += L"\r\nConda is installed, so this option will create or update the named conda environment below.";
+        } else {
+            if (IsDlgButtonChecked(hwnd, kControlEnvironmentDirect) != BST_CHECKED
+                && IsDlgButtonChecked(hwnd, kControlEnvironmentNamed) != BST_CHECKED) {
+                CheckRadioButton(hwnd, kControlEnvironmentDirect, kControlEnvironmentNamed, kControlEnvironmentNamed);
+            }
+            if (window_text(state->environment_name_edit).empty()) {
+                SetWindowTextW(state->environment_name_edit, default_environment_name(state->layout).c_str());
+            }
+            ShowWindow(state->environment_direct_radio, SW_SHOW);
+            ShowWindow(state->environment_named_radio, SW_SHOW);
+            ShowWindow(state->environment_name_label, SW_SHOW);
+            ShowWindow(state->environment_name_edit, SW_SHOW);
+            if (IsDlgButtonChecked(hwnd, kControlEnvironmentDirect) == BST_CHECKED) {
+                note += L"\r\nDirect use installs torch and requirements into the selected Python installation.";
+            } else {
+                note += state->conda_available
+                    ? L"\r\nA named project environment will be created with conda so dependencies stay isolated."
+                    : L"\r\nA named project environment keeps dependencies isolated from the base Python install.";
+            }
+        }
+        SetWindowTextW(state->python_source_note, note.c_str());
+    }
+
+    if (state->script_options.empty()) {
+        EnableWindow(state->launch_script_radio, FALSE);
+        EnableWindow(state->script_combo, FALSE);
+        CheckRadioButton(hwnd, kControlLaunchScript, kControlLaunchCustom, kControlLaunchCustom);
+        EnableWindow(state->custom_command_edit, TRUE);
+        SetWindowTextW(
+            state->launch_note,
+            L"No .py files were found in this folder. Type Python arguments such as -m mypackage or tool.py --flag."
+        );
+    } else {
+        EnableWindow(state->launch_script_radio, TRUE);
+        EnableWindow(state->script_combo, IsDlgButtonChecked(hwnd, kControlLaunchScript) == BST_CHECKED);
+        EnableWindow(state->custom_command_edit, IsDlgButtonChecked(hwnd, kControlLaunchCustom) == BST_CHECKED);
+        SetWindowTextW(
+            state->launch_note,
+            L"Script selections are remembered in run.cfg. Torch pins in requirements.txt are ignored so your launcher choice always wins."
+        );
+    }
+}
+
+void set_window_mode(HWND hwnd, bool setup_mode) {
+    auto* state = reinterpret_cast<WindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!state) {
+        return;
+    }
+    state->setup_mode = setup_mode;
+
+    const std::vector<HWND> setup_controls = {
+        state->setup_intro,
+        state->python_source_label,
+        state->python_source_combo,
+        state->python_source_note,
+        state->environment_direct_radio,
+        state->environment_named_radio,
+        state->environment_name_label,
+        state->environment_name_edit,
+        state->torch_label,
+        state->torch_cuda_radio,
+        state->torch_rocm_radio,
+        state->torch_xpu_radio,
+        state->torch_cpu_radio,
+        state->torch_note,
+        state->launch_script_radio,
+        state->script_combo,
+        state->launch_custom_radio,
+        state->custom_command_edit,
+        state->launch_note,
+        state->start_button
+    };
+    const std::vector<HWND> progress_controls = {
+        state->status_label,
+        state->progress_bar,
+        state->detail_label,
+        state->log_edit
+    };
+
+    for (HWND control : setup_controls) {
+        if (control) {
+            ShowWindow(control, setup_mode ? SW_SHOW : SW_HIDE);
+        }
+    }
+    for (HWND control : progress_controls) {
+        if (control) {
+            ShowWindow(control, setup_mode ? SW_HIDE : SW_SHOW);
+        }
+    }
+    update_setup_controls(hwnd);
+}
+
+void start_launcher_run(HWND hwnd, const RunConfig& run_config, bool confirm_direct_install) {
+    auto* state = reinterpret_cast<WindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!state || state->run_started) {
+        return;
+    }
+
+    if (confirm_direct_install
+        && run_config.environment_kind == EnvironmentKind::Direct
+        && run_config.python_source_kind != PythonSourceKind::Portable) {
+        const int response = MessageBoxW(
+            hwnd,
+            L"This will install torch and the requirements.txt packages into the selected Python 3.12.x installation.\r\n\r\nContinue?",
+            L"Use selected Python directly?",
+            MB_YESNO | MB_ICONWARNING
+        );
+        if (response != IDYES) {
+            return;
+        }
+    }
+
+    state->run_started = true;
+    state->can_close = false;
+    EnableWindow(state->close_button, FALSE);
+    EnableWindow(state->start_button, FALSE);
+    SetWindowTextW(state->status_label, L"Starting launcher...");
+    SendMessageW(state->progress_bar, PBM_SETPOS, 0, 0);
+    SetWindowTextW(state->log_edit, L"");
+    set_window_mode(hwnd, false);
+
+    WorkerContext context{};
+    context.config = state->config;
+    context.layout = state->layout;
+    context.run_config = run_config;
+    context.hwnd = hwnd;
+    context.extra_args = state->extra_args;
+
+    std::thread worker([context]() mutable { bootstrap_worker(std::move(context)); });
+    worker.detach();
 }
 
 void bootstrap_worker(WorkerContext context) {
     try {
+        RunConfig& run_config = context.run_config;
         append_log_line(context.layout.log_file, L"Launcher starting in " + context.layout.project_root.wstring());
-        post_status(context.hwnd, 1, L"Project discovered. Checking Python 3.12...");
+        post_status(context.hwnd, 1, L"Resolving the selected Python runtime...");
         post_log(context.hwnd, L"Project root: " + context.layout.project_root.wstring());
 
-        const std::wstring python_version = resolve_latest_python_version(context.config, context.layout);
-        post_log(context.hwnd, L"Using Python " + python_version);
+        if (run_config.python_source_kind == PythonSourceKind::Portable) {
+            if (run_config.python_version.empty()) {
+                run_config.python_version = resolve_latest_python_version(context.config, context.layout);
+            }
+            post_log(context.hwnd, L"Using portable Python " + run_config.python_version);
+            post_status(context.hwnd, 2, L"Preparing the portable runtime...");
+            ensure_python_runtime(context.config, context.layout, run_config.python_version);
+            configure_active_python(
+                context.layout,
+                context.layout.python_exe,
+                path_exists_no_throw(context.layout.pythonw_exe) ? context.layout.pythonw_exe : context.layout.python_exe,
+                context.layout.python_env_dir
+            );
+            run_config.environment_kind = EnvironmentKind::PortableRuntime;
+            run_config.environment_name = context.config.python_env_dir_name;
+            run_config.environment_path = context.layout.python_env_dir;
+            run_config.python_source_label = L"Portable runtime in the runtime folder";
+            run_config.python_source_path = context.layout.python_base_exe;
+            run_config.python_sourcew_path = context.layout.python_basew_exe;
+        } else {
+            std::optional<PythonSourceOption> source_option;
+            if (run_config.python_source_kind == PythonSourceKind::InstallMachine) {
+                if (run_config.environment_kind == EnvironmentKind::NamedConda) {
+                    if (run_config.python_version.empty()) {
+                        run_config.python_version = context.config.python_series;
+                    }
+                    run_config.environment_name = sanitize_environment_name(run_config.environment_name);
+                    if (run_config.environment_name.empty()) {
+                        run_config.environment_name = default_environment_name(context.layout);
+                    }
+                    post_log(context.hwnd, L"Preparing conda environment " + run_config.environment_name + L" with Python " + context.config.python_series);
+                } else {
+                    source_option = probe_python_source(run_config.python_source_path, context.layout, context.config.python_series, L"Installed Python ", PythonSourceKind::Existing);
+                    if (!source_option.has_value()) {
+                        const std::wstring target_version =
+                            !run_config.python_version.empty() ? run_config.python_version : resolve_latest_python_version(context.config, context.layout);
+                        post_log(context.hwnd, L"Installing Python " + target_version + L" on this machine.");
+                        install_machine_python(context.config, context.layout, target_version);
+                        const auto registered_dir = find_registered_python_install_dir(context.config);
+                        fail_if(
+                            !registered_dir.has_value(),
+                            L"Python installed successfully, but the launcher could not locate the registered Python 3.12.x installation."
+                        );
+                        source_option = probe_python_source(*registered_dir / "python.exe", context.layout, context.config.python_series, L"Installed Python ", PythonSourceKind::Existing);
+                    }
+                }
+            } else {
+                source_option = probe_python_source(run_config.python_source_path, context.layout, context.config.python_series, L"Selected Python ", PythonSourceKind::Existing);
+            }
 
-        post_status(context.hwnd, 2, L"Ensuring local Python runtime...");
-        ensure_python_runtime(context.config, context.layout, python_version);
+            fail_if(
+                !source_option.has_value() && run_config.environment_kind != EnvironmentKind::NamedConda,
+                L"The configured Python 3.12.x interpreter could not be used. Delete run.cfg or start the launcher again to reconfigure."
+            );
 
+            if (source_option.has_value()) {
+                run_config.python_version = source_option->version;
+                run_config.python_source_label = source_option->label;
+                run_config.python_source_path = source_option->python_exe;
+                run_config.python_sourcew_path = source_option->pythonw_exe;
+                post_log(context.hwnd, L"Using base Python: " + run_config.python_source_path.wstring());
+                post_status(context.hwnd, 2, L"Preparing the selected environment...");
+            }
+
+            if (run_config.environment_kind == EnvironmentKind::Direct) {
+                configure_active_python(
+                    context.layout,
+                    run_config.python_source_path,
+                    path_exists_no_throw(run_config.python_sourcew_path) ? run_config.python_sourcew_path : run_config.python_source_path,
+                    std::nullopt
+                );
+                run_config.environment_name.clear();
+                run_config.environment_path.clear();
+            } else if (run_config.environment_kind == EnvironmentKind::NamedConda) {
+                run_config.environment_name = sanitize_environment_name(run_config.environment_name);
+                if (run_config.environment_name.empty()) {
+                    run_config.environment_name = default_environment_name(context.layout);
+                }
+                create_or_update_conda_environment(context.layout, run_config.environment_name, context.config.python_series);
+                const auto conda_prefix = find_conda_environment_prefix(context.layout, run_config.environment_name);
+                fail_if(!conda_prefix.has_value(), L"The conda environment could not be located after creation.");
+                run_config.environment_path = *conda_prefix;
+                const fs::path environment_python = *conda_prefix / "python.exe";
+                const fs::path environment_pythonw = *conda_prefix / "pythonw.exe";
+                const auto conda_option = probe_python_source(
+                    environment_python,
+                    context.layout,
+                    context.config.python_series,
+                    L"Conda env " + run_config.environment_name + L" - Python ",
+                    PythonSourceKind::Existing
+                );
+                fail_if(!conda_option.has_value(), L"The conda environment does not expose a usable Python 3.12.x interpreter.");
+                run_config.python_version = conda_option->version;
+                run_config.python_source_label = conda_option->label;
+                run_config.python_source_path = environment_python;
+                run_config.python_sourcew_path = environment_pythonw;
+                configure_active_python(
+                    context.layout,
+                    environment_python,
+                    path_exists_no_throw(environment_pythonw) ? environment_pythonw : environment_python,
+                    *conda_prefix
+                );
+                post_log(context.hwnd, L"Using conda environment: " + conda_prefix->wstring());
+            } else {
+                run_config.environment_kind = EnvironmentKind::NamedVenv;
+                run_config.environment_name = sanitize_environment_name(run_config.environment_name);
+                if (run_config.environment_name.empty()) {
+                    run_config.environment_name = default_environment_name(context.layout);
+                }
+                run_config.environment_path = context.layout.envs_dir / run_config.environment_name;
+                const fs::path environment_python = run_config.environment_path / "Scripts" / "python.exe";
+                const fs::path environment_pythonw = run_config.environment_path / "Scripts" / "pythonw.exe";
+                if (!path_exists_no_throw(environment_python) || !python_supports_launcher_runtime(environment_python, context.layout.log_file)) {
+                    create_virtual_environment(run_config.python_source_path, run_config.environment_path, context.layout);
+                }
+                configure_active_python(
+                    context.layout,
+                    environment_python,
+                    path_exists_no_throw(environment_pythonw) ? environment_pythonw : environment_python,
+                    run_config.environment_path
+                );
+            }
+        }
+
+        post_log(context.hwnd, L"Active Python: " + context.layout.active_python_exe.wstring());
         set_child_environment(context.layout);
-        post_status(context.hwnd, 3, L"Bootstrapping pip tools...");
+
+        post_status(context.hwnd, 3, L"Bootstrapping pip, setuptools, and wheel...");
         ensure_packaging_tools(context.layout);
 
-        post_status(context.hwnd, 4, L"Detecting accelerator runtime...");
-        const AcceleratorChoice accelerator = detect_accelerator(context.config, context.layout);
+        post_status(context.hwnd, 4, L"Installing the selected torch stack...");
+        const AcceleratorChoice accelerator = accelerator_choice_for_kind(context.config, run_config.accelerator_kind);
         post_log(context.hwnd, accelerator.note);
-
-        post_status(context.hwnd, 5, L"Installing torch, torchvision, and torchaudio...");
         install_torch_stack(context.layout, accelerator);
 
-        post_status(context.hwnd, 6, L"Installing filtered project requirements...");
-        install_project_requirements(context.layout);
+        post_status(context.hwnd, 5, L"Synchronizing requirements.txt...");
+        sync_project_requirements(context.layout, run_config);
 
-        post_status(context.hwnd, 7, L"Launching run.py...");
-        launch_run_script(context.layout, context.extra_args);
+        post_status(context.hwnd, 6, L"Writing run.cfg...");
+        write_run_config(context.layout, run_config);
 
-        post_launched(context.hwnd, L"run.py started successfully. Closing launcher...");
+        post_status(context.hwnd, 7, L"Launching the selected target...");
+        launch_selected_target(context.layout, run_config, context.extra_args);
+        post_launched(
+            context.hwnd,
+            (run_config.launch_kind == LaunchKind::Script ? run_config.launch_target : L"Custom Python command")
+            + L" started successfully. Closing launcher..."
+        );
     } catch (const std::exception& exc) {
         const std::wstring message = wide_from_utf8(exc.what());
         append_log_line(context.layout.log_file, L"Bootstrap failed: " + message);
@@ -1862,11 +3211,306 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(new_state));
         state = new_state;
 
+        state->setup_intro = CreateWindowExW(
+            0,
+            WC_STATICW,
+            L"Choose the Python environment, torch variant, and launch target for this folder. The launcher will remember everything in run.cfg after the first successful setup.",
+            WS_CHILD | WS_VISIBLE,
+            18,
+            18,
+            780,
+            36,
+            hwnd,
+            nullptr,
+            nullptr,
+            nullptr
+        );
+        state->python_source_label = CreateWindowExW(
+            0,
+            WC_STATICW,
+            L"Python 3.12.x source",
+            WS_CHILD | WS_VISIBLE,
+            18,
+            70,
+            220,
+            18,
+            hwnd,
+            nullptr,
+            nullptr,
+            nullptr
+        );
+        state->python_source_combo = CreateWindowExW(
+            0,
+            WC_COMBOBOXW,
+            nullptr,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+            18,
+            92,
+            780,
+            220,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlPythonSourceCombo)),
+            nullptr,
+            nullptr
+        );
+        state->python_source_note = CreateWindowExW(
+            0,
+            WC_STATICW,
+            nullptr,
+            WS_CHILD | WS_VISIBLE,
+            18,
+            126,
+            780,
+            44,
+            hwnd,
+            nullptr,
+            nullptr,
+            nullptr
+        );
+        state->environment_direct_radio = CreateWindowExW(
+            0,
+            WC_BUTTONW,
+            L"Use the selected Python directly",
+            WS_CHILD | WS_VISIBLE | WS_GROUP | WS_TABSTOP | BS_AUTORADIOBUTTON,
+            18,
+            176,
+            300,
+            20,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlEnvironmentDirect)),
+            nullptr,
+            nullptr
+        );
+        state->environment_named_radio = CreateWindowExW(
+            0,
+            WC_BUTTONW,
+            L"Create a named project environment (recommended)",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            18,
+            204,
+            360,
+            20,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlEnvironmentNamed)),
+            nullptr,
+            nullptr
+        );
+        state->environment_name_label = CreateWindowExW(
+            0,
+            WC_STATICW,
+            L"Environment name",
+            WS_CHILD | WS_VISIBLE,
+            42,
+            234,
+            120,
+            18,
+            hwnd,
+            nullptr,
+            nullptr,
+            nullptr
+        );
+        state->environment_name_edit = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            WC_EDITW,
+            nullptr,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            170,
+            230,
+            250,
+            24,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlEnvironmentNameEdit)),
+            nullptr,
+            nullptr
+        );
+        state->torch_label = CreateWindowExW(
+            0,
+            WC_STATICW,
+            L"PyTorch stack",
+            WS_CHILD | WS_VISIBLE,
+            18,
+            270,
+            220,
+            18,
+            hwnd,
+            nullptr,
+            nullptr,
+            nullptr
+        );
+        state->torch_cuda_radio = CreateWindowExW(
+            0,
+            WC_BUTTONW,
+            L"CUDA",
+            WS_CHILD | WS_VISIBLE | WS_GROUP | WS_TABSTOP | BS_AUTORADIOBUTTON,
+            18,
+            294,
+            120,
+            20,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlTorchCuda)),
+            nullptr,
+            nullptr
+        );
+        state->torch_rocm_radio = CreateWindowExW(
+            0,
+            WC_BUTTONW,
+            L"ROCm",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            160,
+            294,
+            120,
+            20,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlTorchRocm)),
+            nullptr,
+            nullptr
+        );
+        state->torch_xpu_radio = CreateWindowExW(
+            0,
+            WC_BUTTONW,
+            L"Intel XPU",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            300,
+            294,
+            140,
+            20,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlTorchXpu)),
+            nullptr,
+            nullptr
+        );
+        state->torch_cpu_radio = CreateWindowExW(
+            0,
+            WC_BUTTONW,
+            L"CPU",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            460,
+            294,
+            120,
+            20,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlTorchCpu)),
+            nullptr,
+            nullptr
+        );
+        state->torch_note = CreateWindowExW(
+            0,
+            WC_STATICW,
+            L"Your torch choice overrides any torch, torchvision, or torchaudio pins in requirements.txt.",
+            WS_CHILD | WS_VISIBLE,
+            18,
+            322,
+            780,
+            28,
+            hwnd,
+            nullptr,
+            nullptr,
+            nullptr
+        );
+        state->launch_script_radio = CreateWindowExW(
+            0,
+            WC_BUTTONW,
+            L"Run a Python script from this folder",
+            WS_CHILD | WS_VISIBLE | WS_GROUP | WS_TABSTOP | BS_AUTORADIOBUTTON,
+            18,
+            366,
+            320,
+            20,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlLaunchScript)),
+            nullptr,
+            nullptr
+        );
+        state->script_combo = CreateWindowExW(
+            0,
+            WC_COMBOBOXW,
+            nullptr,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+            42,
+            392,
+            756,
+            220,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlScriptCombo)),
+            nullptr,
+            nullptr
+        );
+        state->launch_custom_radio = CreateWindowExW(
+            0,
+            WC_BUTTONW,
+            L"Run a custom Python command or module",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            18,
+            426,
+            340,
+            20,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlLaunchCustom)),
+            nullptr,
+            nullptr
+        );
+        state->custom_command_edit = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            WC_EDITW,
+            nullptr,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            42,
+            452,
+            756,
+            24,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlCustomCommandEdit)),
+            nullptr,
+            nullptr
+        );
+        state->launch_note = CreateWindowExW(
+            0,
+            WC_STATICW,
+            L"Examples: -m mypackage, tool.py --flag, or -m uvicorn app:app --reload",
+            WS_CHILD | WS_VISIBLE,
+            18,
+            484,
+            780,
+            18,
+            hwnd,
+            nullptr,
+            nullptr,
+            nullptr
+        );
+        state->start_button = CreateWindowExW(
+            0,
+            WC_BUTTONW,
+            L"Save && Launch",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            590,
+            518,
+            110,
+            30,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlStart)),
+            nullptr,
+            nullptr
+        );
+        state->close_button = CreateWindowExW(
+            0,
+            WC_BUTTONW,
+            L"Close",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            708,
+            518,
+            90,
+            30,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlClose)),
+            nullptr,
+            nullptr
+        );
+
         state->status_label = CreateWindowExW(
             0,
             WC_STATICW,
             L"Preparing launcher...",
-            WS_CHILD | WS_VISIBLE,
+            WS_CHILD,
             18,
             18,
             780,
@@ -1876,12 +3520,11 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             nullptr,
             nullptr
         );
-
         state->progress_bar = CreateWindowExW(
             0,
             PROGRESS_CLASSW,
             nullptr,
-            WS_CHILD | WS_VISIBLE,
+            WS_CHILD,
             18,
             54,
             780,
@@ -1893,12 +3536,11 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
         );
         SendMessageW(state->progress_bar, PBM_SETRANGE32, 0, kProgressMax);
         SendMessageW(state->progress_bar, PBM_SETPOS, 0, 0);
-
         state->detail_label = CreateWindowExW(
             0,
             WC_STATICW,
             L"Logs will appear below.",
-            WS_CHILD | WS_VISIBLE,
+            WS_CHILD,
             18,
             84,
             780,
@@ -1908,42 +3550,63 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             nullptr,
             nullptr
         );
-
         state->log_edit = CreateWindowExW(
             WS_EX_CLIENTEDGE,
             WC_EDITW,
             nullptr,
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+            WS_CHILD | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
             18,
             112,
             780,
-            362,
+            390,
             hwnd,
             nullptr,
-            nullptr,
-            nullptr
-        );
-
-        state->close_button = CreateWindowExW(
-            0,
-            WC_BUTTONW,
-            L"Close",
-            WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_PUSHBUTTON,
-            708,
-            486,
-            90,
-            30,
-            hwnd,
-            reinterpret_cast<HMENU>(1),
             nullptr,
             nullptr
         );
         return 0;
     }
     case WM_COMMAND:
-        if (LOWORD(w_param) == 1 && state && state->can_close) {
-            DestroyWindow(hwnd);
+        if (!state) {
+            break;
+        }
+        switch (LOWORD(w_param)) {
+        case kControlClose:
+            if (state->can_close) {
+                DestroyWindow(hwnd);
+            } else {
+                MessageBeep(MB_ICONINFORMATION);
+            }
             return 0;
+        case kControlStart:
+            try {
+                start_launcher_run(hwnd, collect_run_config_from_controls(hwnd, *state));
+            } catch (const std::exception& exc) {
+                MessageBoxW(hwnd, wide_from_utf8(exc.what()).c_str(), L"Setup incomplete", MB_OK | MB_ICONWARNING);
+            }
+            return 0;
+        case kControlPythonSourceCombo:
+            if (HIWORD(w_param) == CBN_SELCHANGE) {
+                const LRESULT selected_index = SendMessageW(state->python_source_combo, CB_GETCURSEL, 0, 0);
+                if (selected_index != CB_ERR
+                    && selected_index >= 0
+                    && static_cast<size_t>(selected_index) < state->python_sources.size()
+                    && state->python_sources[static_cast<size_t>(selected_index)].kind == PythonSourceKind::Existing) {
+                    CheckRadioButton(hwnd, kControlEnvironmentDirect, kControlEnvironmentNamed, kControlEnvironmentDirect);
+                }
+                update_setup_controls(hwnd);
+            }
+            return 0;
+        case kControlEnvironmentDirect:
+        case kControlEnvironmentNamed:
+        case kControlLaunchScript:
+        case kControlLaunchCustom:
+            if (HIWORD(w_param) == BN_CLICKED) {
+                update_setup_controls(hwnd);
+            }
+            return 0;
+        default:
+            break;
         }
         break;
     case WM_CLOSE:
@@ -1976,12 +3639,14 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             SendMessageW(state->progress_bar, PBM_SETPOS, kProgressMax, 0);
             append_log_to_edit(state->log_edit, payload->text);
             state->can_close = true;
+            state->run_started = false;
             EnableWindow(state->close_button, TRUE);
         } else if (message == WMU_LAUNCHED) {
             SetWindowTextW(state->status_label, payload->text.c_str());
             SendMessageW(state->progress_bar, PBM_SETPOS, kProgressMax, 0);
             append_log_to_edit(state->log_edit, payload->text);
             state->can_close = true;
+            state->run_started = false;
             EnableWindow(state->close_button, TRUE);
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
         }
@@ -2012,12 +3677,12 @@ HWND create_launcher_window(HINSTANCE instance, const fs::path& log_file) {
     HWND hwnd = CreateWindowExW(
         0,
         kWindowClassName,
-        L"Local Python Runtime Launcher",
+        L"Python Launch Helper",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         836,
-        572,
+        620,
         nullptr,
         nullptr,
         instance,
@@ -2031,6 +3696,7 @@ HWND create_launcher_window(HINSTANCE instance, const fs::path& log_file) {
     if (auto* window_state = reinterpret_cast<WindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA))) {
         window_state->log_file = log_file;
         SetWindowTextW(window_state->detail_label, log_file.wstring().c_str());
+        set_window_mode(hwnd, true);
     }
     return hwnd;
 }
@@ -2056,23 +3722,91 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         LauncherConfig config{};
         ProjectLayout layout = resolve_project_layout(config);
         const HWND hwnd = create_launcher_window(instance, layout.log_file);
+        auto* state = reinterpret_cast<WindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        fail_if(state == nullptr, L"Could not initialize the launcher window state.");
+        state->config = config;
+        state->layout = layout;
+        state->extra_args = parse_extra_arguments();
+        state->conda_executable = find_conda_executable().value_or(fs::path());
+        state->conda_available = !state->conda_executable.empty();
 
-        post_log(hwnd, L"Launcher executable: " + executable_path().wstring());
-        post_log(hwnd, L"Project root: " + layout.project_root.wstring());
-        if (fs::exists(layout.requirements_file)) {
-            post_log(hwnd, L"Using requirements file: " + layout.requirements_file.wstring());
+        append_log_line(layout.log_file, L"Launcher executable: " + executable_path().wstring());
+        append_log_line(layout.log_file, L"Project root: " + layout.project_root.wstring());
+        if (state->conda_available) {
+            append_log_line(layout.log_file, L"Conda detected at " + state->conda_executable.wstring());
         } else {
-            post_log(hwnd, L"No requirements.txt was found next to run.py.");
+            append_log_line(layout.log_file, L"Conda was not detected.");
+        }
+        if (fs::exists(layout.requirements_file)) {
+            append_log_line(layout.log_file, L"Using requirements file: " + layout.requirements_file.wstring());
+        } else {
+            append_log_line(layout.log_file, L"No requirements.txt was found next to launch.exe.");
         }
 
-        WorkerContext context{};
-        context.config = config;
-        context.layout = layout;
-        context.hwnd = hwnd;
-        context.extra_args = parse_extra_arguments();
+        state->python_sources = discover_python_sources(config, layout);
+        state->script_options = discover_script_options(layout);
+        append_log_line(
+            layout.log_file,
+            L"Discovered " + wide_from_utf8(std::to_string(state->python_sources.size())) + L" Python source option(s)."
+        );
+        for (const auto& source : state->python_sources) {
+            append_log_line(layout.log_file, L"Python source option: " + source.label);
+        }
+        for (const auto& source : state->python_sources) {
+            SendMessageW(state->python_source_combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(source.label.c_str()));
+        }
+        for (const auto& script : state->script_options) {
+            SendMessageW(state->script_combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(script.wstring().c_str()));
+        }
 
-        std::thread worker([context]() mutable { bootstrap_worker(std::move(context)); });
-        worker.detach();
+        const int default_python_index = state->python_sources.size() > 2 ? 0 : static_cast<int>(state->python_sources.size()) - 1;
+        if (!state->python_sources.empty() && default_python_index >= 0) {
+            SendMessageW(state->python_source_combo, CB_SETCURSEL, default_python_index, 0);
+        }
+        if (!state->script_options.empty()) {
+            SendMessageW(state->script_combo, CB_SETCURSEL, 0, 0);
+            CheckRadioButton(hwnd, kControlLaunchScript, kControlLaunchCustom, kControlLaunchScript);
+        } else {
+            CheckRadioButton(hwnd, kControlLaunchScript, kControlLaunchCustom, kControlLaunchCustom);
+        }
+        CheckRadioButton(hwnd, kControlEnvironmentDirect, kControlEnvironmentNamed, kControlEnvironmentNamed);
+
+        const AcceleratorChoice recommended = detect_accelerator(config, layout);
+        switch (recommended.kind) {
+        case AcceleratorKind::NvidiaCuda:
+            CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchCuda);
+            break;
+        case AcceleratorKind::AmdRocm:
+            CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchRocm);
+            break;
+        case AcceleratorKind::IntelArcXpu:
+            CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchXpu);
+            break;
+        case AcceleratorKind::Cpu:
+            CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchCpu);
+            break;
+        }
+        SetWindowTextW(state->torch_note, recommended.note.c_str());
+        SetWindowTextW(state->environment_name_edit, default_environment_name(layout).c_str());
+        update_setup_controls(hwnd);
+
+        try {
+            state->saved_config = load_run_config(layout);
+        } catch (const std::exception& exc) {
+            append_log_line(layout.log_file, L"Could not read run.cfg: " + wide_from_utf8(exc.what()));
+            state->saved_config.reset();
+        }
+
+        if (state->saved_config.has_value()) {
+            if (run_config_is_usable(*state->saved_config, layout)) {
+                start_launcher_run(hwnd, *state->saved_config, false);
+            } else {
+                SetWindowTextW(
+                    state->setup_intro,
+                    L"The saved run.cfg could not be reused. Review the selections below, then save and launch again."
+                );
+            }
+        }
 
         MSG message{};
         while (GetMessageW(&message, nullptr, 0, 0) > 0) {

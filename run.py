@@ -15,6 +15,14 @@ from typing import Callable
 
 WORKSPACE_DIR = Path(__file__).resolve().parent
 EXTERNAL_PROJECTS_DIR = WORKSPACE_DIR / "external"
+SCRIPT_BOOTSTRAP = (
+    "import runpy, sys; "
+    "from pathlib import Path; "
+    "script = Path(sys.argv[1]).resolve(); "
+    "sys.path.insert(0, str(script.parent)); "
+    "sys.argv = [str(script), *sys.argv[2:]]; "
+    "runpy.run_path(str(script), run_name='__main__')"
+)
 
 
 @dataclass(frozen=True)
@@ -315,6 +323,13 @@ def update_car_project() -> str:
     return update_external_project(CAR_PROJECT)
 
 
+def launch_script(script_path: Path, *script_args: str) -> None:
+    subprocess.Popen(
+        [sys.executable, "-c", SCRIPT_BOOTSTRAP, str(script_path), *script_args],
+        cwd=str(script_path.parent),
+    )
+
+
 @dataclass(frozen=True)
 class DemoEntry:
     title: str
@@ -508,10 +523,7 @@ class DemoLauncherApp:
                 self.status_var.set(f"Preparing {demo.title}...")
                 self.root.update_idletasks()
                 script_path = demo.bootstrap()
-            subprocess.Popen(
-                [sys.executable, str(script_path)],
-                cwd=str(script_path.parent),
-            )
+            launch_script(script_path)
         except Exception as exc:
             messagebox.showerror(
                 "Launch failed",

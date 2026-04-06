@@ -4,3 +4,4 @@ external/
 *.pt
 mnist_data/
 __pycache__/
+run.cfg

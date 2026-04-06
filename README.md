@@ -4,9 +4,9 @@ This folder contains several presentation-friendly Python GUIs and demos for rei
 
 ## If you are new to Python then here is a quick way around.
 
-The launch.exe will setup a runtime folder and download and configure the stand alone version of python.  Then it will run a launcher that will allow running the 4 examples.
+The launch.exe will setup a runtime folder and download and configure the stand alone version of python. Then it will run a launcher that will allow running the 4 examples.
 The first time will take a bit of time, since it is a setup effectively.  But it runs independently so no conflict issues.  
-Subsequent runs will just run the launcher while the runtime folder exists.
+Subsequent runs will just run the launcher while the runtime folder exists. The launcher now downloads [jeffvan302/ml_rocket_lander](https://github.com/jeffvan302/ml_rocket_lander) and [jeffvan302/ml-car-driver](https://github.com/jeffvan302/ml-car-driver) into the `external` folder the first time you open those demos, so this repo does not need to carry duplicate local copies.
 
 ## Vibe Coding your own rocket game with learning ability
 You can see the Vibe Coding with project requirements at this repository: [https://github.com/jeffvan302/ml_rocket_lander](https://github.com/jeffvan302/ml_rocket_lander).
@@ -76,20 +76,19 @@ Notes:
 
 ## Files In This Folder
 
-- `demo_launcher.py`
+- `run.py`
 - `mnist_cnn_visualizer_gui.py`
-- `forager_raider_drl_gui.py`
-- `rocket_landing_drl_gui.py`
 - `ultralytics_yolo26_video_gui.py`
 - `requirements.txt`
-- `rocket.png`
+- `external/ml_rocket_lander` (created automatically on first rocket launch)
+- `external/ml-car-driver` (created automatically on first car-driver launch)
 
 ## Quick Launcher
 
 Script:
 
 ```powershell
-python demo_launcher.py
+python run.py
 ```
 
 What it does:
@@ -97,78 +96,75 @@ What it does:
 - Opens a small launcher window with quick-launch buttons for the main GUI demos.
 - Uses the same Python interpreter and active Conda environment that started the launcher.
 - Shows when a demo cannot be launched because a required file is missing.
+- Downloads `jeffvan302/ml_rocket_lander` into `external/ml_rocket_lander` the first time `Rocket Landing Lab` is launched.
+- Downloads `jeffvan302/ml-car-driver` into `external/ml-car-driver` the first time `Car Driver Lab` is launched.
+- Adds an `Update` button on the `Rocket Landing Lab` and `Car Driver Lab` cards so you can refresh those vendored copies later.
 
 Button order:
 
-1. `Forager vs Raider Deep RL GUI`
-2. `Rocket Landing Deep RL GUI`
+1. `Rocket Landing Lab`
+2. `Car Driver Lab`
 3. `MNIST CNN Visualizer`
 4. `Ultralytics YOLO26 Video GUI`
 
-## Forager vs Raider Deep RL GUI
+## Rocket Landing Lab
 
 Script:
 
 ```powershell
-python forager_raider_drl_gui.py
+python run.py
 ```
 
 What it does:
 
-- Runs a small deep-RL gridworld with a `forager` and a `raider`.
-- Lets you train either side with `dqn` or `double_dqn`.
-- Shows the arena, scores, and a live neural-network panel with activations and Q-values.
+- Launches the top-level demo picker.
+- When you choose `Rocket Landing Lab`, the launcher downloads [jeffvan302/ml_rocket_lander](https://github.com/jeffvan302/ml_rocket_lander) into `external/ml_rocket_lander` if it is not already present, then starts that project's own `run.py`.
+- Keeps the upstream rocket project isolated in its own subfolder so there is no `run.py` filename conflict in the root folder.
 
-How to use it:
 
 1. Launch the script.
-2. In the left panel, choose the algorithm, the side to train, and the network layout.
-3. Adjust learning settings like `learning rate`, replay size, epsilon schedule, and update rate.
-4. Press `Start / Restart` to begin or reset training.
-5. Watch the arena score at the top of the visualization to see who is ahead in the current episode.
-6. Use `Pause` to stop the stepping loop and study the current arena state and network values.
+2. Click `Rocket Landing Lab`.
+3. Wait for the first-run download to finish if the subfolder has not been installed yet.
+4. Use the upstream rocket project's GUI as normal.
 
-Useful command-line options:
+The `Update` button on that card will refresh the installed copy later. When the folder is a git clone, the launcher uses `git pull --ff-only`. Otherwise it replaces the folder with the latest GitHub archive snapshot.
 
-- `--trainer dqn|double_dqn`
-- `--train-side forager|raider`
-- `--hidden 16` or `--hidden 32,16`
-- `--activation relu|sigmoid|tanh`
-- `--smoke-test-steps <n>`: run headless training steps instead of opening the GUI
-
-Examples:
+Once installed, you can also run the upstream project directly:
 
 ```powershell
-python forager_raider_drl_gui.py
+python external/ml_rocket_lander/run.py
+python external/ml_rocket_lander/run.py gui
+python external/ml_rocket_lander/run.py smoke-test
 ```
 
-## Rocket Landing Deep RL GUI
+## Car Driver Lab
 
 Script:
 
 ```powershell
-python rocket_landing_drl_gui.py
+python run.py
 ```
 
 What it does:
 
-- Provides a PPO or REINFORCE rocket-landing demo with a live replay and neural-network visualization.
-- Lets you tune spawn settings, physics, optimizer settings, rewards, penalties, and hidden-layer layout.
-
+- Launches the top-level demo picker.
+- When you choose `Car Driver Lab`, the launcher downloads [jeffvan302/ml-car-driver](https://github.com/jeffvan302/ml-car-driver) into `external/ml-car-driver` if it is not already present, then starts that project's own `run.py`.
+- Keeps the upstream car-driver project isolated in its own subfolder so there is no `run.py` filename conflict in the root folder.
 
 1. Launch the script.
-2. Adjust training, spawn, physics, and reward-shaping settings on the left.
-3. Press `Start / Restart` to begin training.
-4. Watch the replay, training graph, and network panel update by generation.
-5. Use `Pause` to inspect the current learned policy.
+2. Click `Car Driver Lab`.
+3. Wait for the first-run download to finish if the subfolder has not been installed yet.
+4. Use the upstream car-driver project's GUI as normal.
 
-Useful command-line options in the script:
+The `Update` button on that card will refresh the installed copy later. When the folder is a git clone, the launcher uses `git pull --ff-only`. Otherwise it replaces the folder with the latest GitHub archive snapshot.
 
-- `--trainer ppo|reinforce`
-- `--hidden 10,40,6`
-- `--spawn-mode random|side|centered`
-- `--spawn-randomness standard|dramatic`
-- `--smoke-test-generations <n>`
+Once installed, you can also run the upstream project directly:
+
+```powershell
+python external/ml-car-driver/run.py
+python external/ml-car-driver/run.py gui
+python external/ml-car-driver/run.py smoke-test
+```
 
 ## MNIST CNN Visualizer
 

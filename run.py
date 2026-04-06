@@ -1,14 +1,222 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
+import tempfile
 import tkinter as tk
+import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import messagebox, ttk
+from typing import Callable
 
 
 WORKSPACE_DIR = Path(__file__).resolve().parent
+EXTERNAL_PROJECTS_DIR = WORKSPACE_DIR / "external"
+
+
+@dataclass(frozen=True)
+class ManagedProject:
+    display_name: str
+    repo_url: str
+    archive_url: str
+    install_dir: Path
+    entry_script: str = "run.py"
+
+    @property
+    def run_path(self) -> Path:
+        return self.install_dir / self.entry_script
+
+    @property
+    def repo_name(self) -> str:
+        return self.repo_url.rstrip("/").split("/")[-1].removesuffix(".git")
+
+    @property
+    def relative_install_dir(self) -> str:
+        try:
+            return str(self.install_dir.relative_to(WORKSPACE_DIR))
+        except ValueError:
+            return str(self.install_dir)
+
+
+ROCKET_PROJECT = ManagedProject(
+    display_name="Rocket Landing Lab",
+    repo_url="https://github.com/jeffvan302/ml_rocket_lander.git",
+    archive_url="https://github.com/jeffvan302/ml_rocket_lander/archive/refs/heads/main.zip",
+    install_dir=EXTERNAL_PROJECTS_DIR / "ml_rocket_lander",
+)
+CAR_PROJECT = ManagedProject(
+    display_name="Car Driver Lab",
+    repo_url="https://github.com/jeffvan302/ml-car-driver.git",
+    archive_url="https://github.com/jeffvan302/ml-car-driver/archive/refs/heads/main.zip",
+    install_dir=EXTERNAL_PROJECTS_DIR / "ml-car-driver",
+)
+
+
+def _clear_install_target(target_dir: Path) -> None:
+    if not target_dir.exists():
+        return
+    if target_dir.is_dir():
+        shutil.rmtree(target_dir)
+        return
+    target_dir.unlink()
+
+
+def _download_project_archive(project: ManagedProject, target_dir: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix=f"{project.repo_name}_", dir=WORKSPACE_DIR) as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        archive_path = temp_dir / f"{project.repo_name}.zip"
+        with urllib.request.urlopen(project.archive_url, timeout=90) as response:
+            archive_path.write_bytes(response.read())
+        with zipfile.ZipFile(archive_path) as archive:
+            archive.extractall(temp_dir)
+        extracted_dir = next(temp_dir.glob(f"{project.repo_name}-*"), None)
+        if extracted_dir is None:
+            raise RuntimeError(
+                f"Downloaded archive did not contain the expected {project.repo_name} folder."
+            )
+        shutil.move(str(extracted_dir), str(target_dir))
+
+
+def _replace_project_from_archive(project: ManagedProject) -> None:
+    EXTERNAL_PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    replacement_dir = EXTERNAL_PROJECTS_DIR / f".{project.install_dir.name}_update"
+    backup_dir = EXTERNAL_PROJECTS_DIR / f".{project.install_dir.name}_backup"
+
+    _clear_install_target(replacement_dir)
+    _clear_install_target(backup_dir)
+    _download_project_archive(project, replacement_dir)
+
+    try:
+        if project.install_dir.exists():
+            shutil.move(str(project.install_dir), str(backup_dir))
+        shutil.move(str(replacement_dir), str(project.install_dir))
+    except Exception:
+        if not project.install_dir.exists() and backup_dir.exists():
+            shutil.move(str(backup_dir), str(project.install_dir))
+        raise
+    finally:
+        _clear_install_target(replacement_dir)
+        _clear_install_target(backup_dir)
+
+
+def _project_has_local_changes(project: ManagedProject, git_executable: str) -> bool:
+    status_result = subprocess.run(
+        [git_executable, "-C", str(project.install_dir), "status", "--porcelain"],
+        cwd=str(WORKSPACE_DIR),
+        capture_output=True,
+        text=True,
+    )
+    return status_result.returncode == 0 and bool(status_result.stdout.strip())
+
+
+def ensure_external_project(project: ManagedProject) -> Path:
+    if project.run_path.exists():
+        return project.run_path
+
+    EXTERNAL_PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    errors: list[str] = []
+
+    git_executable = shutil.which("git")
+    if git_executable:
+        _clear_install_target(project.install_dir)
+        clone_result = subprocess.run(
+            [git_executable, "clone", "--depth", "1", project.repo_url, str(project.install_dir)],
+            cwd=str(WORKSPACE_DIR),
+            capture_output=True,
+            text=True,
+        )
+        if clone_result.returncode == 0 and project.run_path.exists():
+            return project.run_path
+        _clear_install_target(project.install_dir)
+        error_output = clone_result.stderr.strip() or clone_result.stdout.strip() or "git clone failed."
+        errors.append(f"git clone: {error_output}")
+    else:
+        errors.append("git clone: Git is not installed or not on PATH.")
+
+    try:
+        _clear_install_target(project.install_dir)
+        _download_project_archive(project, project.install_dir)
+    except Exception as exc:
+        _clear_install_target(project.install_dir)
+        errors.append(f"zip download: {exc}")
+    else:
+        if project.run_path.exists():
+            return project.run_path
+        _clear_install_target(project.install_dir)
+        errors.append(
+            f"zip download: install completed but {project.entry_script} was missing afterwards."
+        )
+
+    details = "\n\n".join(errors)
+    raise RuntimeError(
+        f"Could not download the {project.display_name} project from {project.repo_url}.\n\n"
+        f"{details}"
+    )
+
+
+def update_external_project(project: ManagedProject) -> str:
+    if not project.run_path.exists():
+        ensure_external_project(project)
+        return f"Installed {project.display_name} into {project.relative_install_dir}."
+
+    git_executable = shutil.which("git")
+    has_git_checkout = (project.install_dir / ".git").exists()
+    if git_executable and has_git_checkout:
+        if _project_has_local_changes(project, git_executable):
+            raise RuntimeError(
+                f"{project.display_name} has local changes in {project.relative_install_dir}, so the launcher "
+                "will not auto-update it. Commit, stash, or remove those changes first."
+            )
+
+        old_head_result = subprocess.run(
+            [git_executable, "-C", str(project.install_dir), "rev-parse", "HEAD"],
+            cwd=str(WORKSPACE_DIR),
+            capture_output=True,
+            text=True,
+        )
+        pull_result = subprocess.run(
+            [git_executable, "-C", str(project.install_dir), "pull", "--ff-only"],
+            cwd=str(WORKSPACE_DIR),
+            capture_output=True,
+            text=True,
+        )
+        if pull_result.returncode != 0:
+            error_output = pull_result.stderr.strip() or pull_result.stdout.strip() or "git pull failed."
+            raise RuntimeError(f"Could not update {project.display_name}.\n\n{error_output}")
+
+        new_head_result = subprocess.run(
+            [git_executable, "-C", str(project.install_dir), "rev-parse", "HEAD"],
+            cwd=str(WORKSPACE_DIR),
+            capture_output=True,
+            text=True,
+        )
+        old_head = old_head_result.stdout.strip()
+        new_head = new_head_result.stdout.strip()
+        if old_head and new_head and old_head != new_head:
+            return f"Updated {project.display_name} to commit {new_head[:7]}."
+        return f"{project.display_name} is already up to date."
+
+    _replace_project_from_archive(project)
+    return f"Refreshed {project.display_name} from the latest GitHub archive."
+
+
+def ensure_rocket_project() -> Path:
+    return ensure_external_project(ROCKET_PROJECT)
+
+
+def update_rocket_project() -> str:
+    return update_external_project(ROCKET_PROJECT)
+
+
+def ensure_car_project() -> Path:
+    return ensure_external_project(CAR_PROJECT)
+
+
+def update_car_project() -> str:
+    return update_external_project(CAR_PROJECT)
 
 
 @dataclass(frozen=True)
@@ -17,32 +225,53 @@ class DemoEntry:
     script_name: str
     subtitle: str
     required_files: tuple[str, ...] = ()
+    base_dir: Path = WORKSPACE_DIR
+    install_note: str | None = None
+    bootstrap: Callable[[], Path] | None = None
+    updater: Callable[[], str] | None = None
 
     @property
     def script_path(self) -> Path:
-        return WORKSPACE_DIR / self.script_name
+        return self.base_dir / self.script_name
+
+    @property
+    def can_self_install(self) -> bool:
+        return self.install_note is not None and self.bootstrap is not None
 
     def missing_requirements(self) -> list[str]:
         missing: list[str] = []
-        if not self.script_path.exists():
+        if not self.script_path.exists() and not self.can_self_install:
             missing.append(self.script_name)
         for filename in self.required_files:
-            if not (WORKSPACE_DIR / filename).exists():
+            if not (self.base_dir / filename).exists():
                 missing.append(filename)
         return missing
+
+    def display_location(self) -> str:
+        try:
+            return str(self.script_path.relative_to(WORKSPACE_DIR))
+        except ValueError:
+            return str(self.script_path)
 
 
 DEMOS = (
     DemoEntry(
-        title="1) Forager vs Raider Deep RL GUI",
-        script_name="forager_raider_drl_gui.py",
-        subtitle="Gridworld deep-RL demo with arena and network visualization.",
+        title="1) Rocket Landing Lab",
+        script_name="run.py",
+        subtitle="Jeff van Niekerk's PPO rocket lander, installed into its own subfolder on first launch.",
+        base_dir=ROCKET_PROJECT.install_dir,
+        install_note="First launch downloads https://github.com/jeffvan302/ml_rocket_lander into external/ml_rocket_lander.",
+        bootstrap=ensure_rocket_project,
+        updater=update_rocket_project,
     ),
     DemoEntry(
-        title="2) Rocket Landing Deep RL GUI",
-        script_name="rocket_landing_drl_gui.py",
-        subtitle="PPO / REINFORCE rocket demo with replay, graph, and network panel.",
-        required_files=("rocket_landing_rl_demo.py",),
+        title="2) Car Driver Lab",
+        script_name="run.py",
+        subtitle="Jeff van Niekerk's PPO car driver, installed into its own subfolder on first launch.",
+        base_dir=CAR_PROJECT.install_dir,
+        install_note="First launch downloads https://github.com/jeffvan302/ml-car-driver into external/ml-car-driver.",
+        bootstrap=ensure_car_project,
+        updater=update_car_project,
     ),
     DemoEntry(
         title="3) MNIST CNN Visualizer",
@@ -133,8 +362,11 @@ class DemoLauncherApp:
         if missing:
             note_text = "Unavailable right now: missing " + ", ".join(missing)
             note_color = "#8a5a2b"
+        elif demo.install_note and not demo.script_path.exists():
+            note_text = demo.install_note
+            note_color = "#40606f"
         else:
-            note_text = f"Script: {demo.script_name}"
+            note_text = f"Script: {demo.display_location()}"
             note_color = "#5f6d73"
 
         ttk.Label(
@@ -144,14 +376,24 @@ class DemoLauncherApp:
             foreground=note_color,
         ).grid(row=2, column=0, sticky="w", pady=(8, 0))
 
-        button = ttk.Button(
-            card,
+        buttons = ttk.Frame(card)
+        buttons.grid(row=0, column=1, rowspan=3, sticky="e")
+
+        launch_button = ttk.Button(
+            buttons,
             text="Launch",
             command=lambda entry=demo: self._launch_demo(entry),
         )
-        button.grid(row=0, column=1, rowspan=3, sticky="e")
+        launch_button.grid(row=0, column=0, sticky="e")
         if missing:
-            button.state(["disabled"])
+            launch_button.state(["disabled"])
+
+        if demo.updater is not None:
+            ttk.Button(
+                buttons,
+                text="Update",
+                command=lambda entry=demo: self._update_demo(entry),
+            ).grid(row=1, column=0, sticky="e", pady=(8, 0))
 
     def _launch_demo(self, demo: DemoEntry) -> None:
         missing = demo.missing_requirements()
@@ -164,10 +406,15 @@ class DemoLauncherApp:
             self.status_var.set(f"{demo.title} is unavailable because required files are missing.")
             return
 
+        script_path = demo.script_path
         try:
+            if demo.bootstrap is not None:
+                self.status_var.set(f"Preparing {demo.title}...")
+                self.root.update_idletasks()
+                script_path = demo.bootstrap()
             subprocess.Popen(
-                [sys.executable, str(demo.script_path)],
-                cwd=str(WORKSPACE_DIR),
+                [sys.executable, str(script_path)],
+                cwd=str(script_path.parent),
             )
         except Exception as exc:
             messagebox.showerror(
@@ -179,6 +426,35 @@ class DemoLauncherApp:
             return
 
         self.status_var.set(f"Launched {demo.title} with {Path(sys.executable).name}.")
+
+    def _update_demo(self, demo: DemoEntry) -> None:
+        if demo.updater is None:
+            messagebox.showinfo(
+                "No updater available",
+                f"{demo.title} does not have an updater action.",
+                parent=self.root,
+            )
+            return
+
+        try:
+            self.status_var.set(f"Updating {demo.title}...")
+            self.root.update_idletasks()
+            result_message = demo.updater()
+        except Exception as exc:
+            messagebox.showerror(
+                "Update failed",
+                f"Could not update {demo.title}.\n\n{exc}",
+                parent=self.root,
+            )
+            self.status_var.set(f"Could not update {demo.title}.")
+            return
+
+        messagebox.showinfo(
+            "Update complete",
+            result_message,
+            parent=self.root,
+        )
+        self.status_var.set(result_message)
 
 
 def main() -> None:

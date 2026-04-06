@@ -305,7 +305,7 @@ conda env remove --name myenv
 conda create --name demoenv python=3.11
 conda activate demoenv
 pip install -r requirements.txt
-python demo_launcher.py
+python run.py
 ```
 
 ## Tips

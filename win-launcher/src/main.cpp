@@ -4,6 +4,8 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <objidl.h>
+#include <gdiplus.h>
 #include <shellapi.h>
 #include <urlmon.h>
 
@@ -27,6 +29,8 @@
 #include <cwctype>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "Advapi32.lib")
 
@@ -38,8 +42,11 @@ constexpr UINT WMU_STATUS = WM_APP + 1;
 constexpr UINT WMU_LOG = WM_APP + 2;
 constexpr UINT WMU_FAILED = WM_APP + 3;
 constexpr UINT WMU_LAUNCHED = WM_APP + 4;
+constexpr UINT WMU_INIT_READY = WM_APP + 5;
+constexpr UINT WMU_INIT_ERROR = WM_APP + 6;
 constexpr int kProgressMax = 7;
 constexpr wchar_t kWindowClassName[] = L"project_python_runtime_launcher";
+constexpr wchar_t kSplashWindowClassName[] = L"project_python_runtime_splash";
 constexpr int kControlClose = 1;
 constexpr int kControlStart = 2;
 constexpr int kControlPythonSourceCombo = 100;
@@ -214,6 +221,8 @@ struct WindowState {
     fs::path log_file;
     fs::path conda_executable;
     bool conda_available = false;
+    HWND splash_hwnd = nullptr;
+    fs::path splash_image_file;
 };
 
 struct WorkerContext {
@@ -222,6 +231,25 @@ struct WorkerContext {
     RunConfig run_config;
     HWND hwnd = nullptr;
     std::vector<std::wstring> extra_args;
+};
+
+struct StartupResult {
+    fs::path conda_executable;
+    bool conda_available = false;
+    std::vector<PythonSourceOption> python_sources;
+    std::vector<fs::path> script_options;
+    std::optional<RunConfig> saved_config;
+    AcceleratorChoice recommended;
+};
+
+struct StartupContext {
+    LauncherConfig config;
+    ProjectLayout layout;
+    HWND hwnd = nullptr;
+};
+
+struct SplashState {
+    std::unique_ptr<Gdiplus::Image> image;
 };
 
 std::wstring trim_copy(std::wstring value);
@@ -360,11 +388,15 @@ ProjectLayout resolve_project_layout(const LauncherConfig& config);
 RunConfig collect_run_config_from_controls(HWND hwnd, const WindowState& state);
 void update_setup_controls(HWND hwnd);
 void set_window_mode(HWND hwnd, bool setup_mode);
+void populate_window_after_startup(HWND hwnd, WindowState& state, const StartupResult& startup);
 void start_launcher_run(HWND hwnd, const RunConfig& run_config, bool confirm_direct_install = true);
+void startup_worker(StartupContext context);
 void bootstrap_worker(WorkerContext context);
 void append_log_to_edit(HWND edit_control, const std::wstring& text);
+LRESULT CALLBACK splash_window_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param);
 LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param);
-HWND create_launcher_window(HINSTANCE instance, const fs::path& log_file);
+HWND create_splash_overlay(HINSTANCE instance, HWND parent, const fs::path& image_file);
+HWND create_launcher_window(HINSTANCE instance, const fs::path& log_file, const fs::path& splash_image_file);
 std::vector<std::wstring> parse_extra_arguments();
 
 std::wstring trim_copy(std::wstring value) {
@@ -2992,6 +3024,54 @@ void set_window_mode(HWND hwnd, bool setup_mode) {
     update_setup_controls(hwnd);
 }
 
+void populate_window_after_startup(HWND hwnd, WindowState& state, const StartupResult& startup) {
+    state.conda_executable = startup.conda_executable;
+    state.conda_available = startup.conda_available;
+    state.python_sources = startup.python_sources;
+    state.script_options = startup.script_options;
+    state.saved_config = startup.saved_config;
+
+    SendMessageW(state.python_source_combo, CB_RESETCONTENT, 0, 0);
+    SendMessageW(state.script_combo, CB_RESETCONTENT, 0, 0);
+
+    for (const auto& source : state.python_sources) {
+        SendMessageW(state.python_source_combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(source.label.c_str()));
+    }
+    for (const auto& script : state.script_options) {
+        SendMessageW(state.script_combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(script.wstring().c_str()));
+    }
+
+    const int default_python_index = state.python_sources.size() > 2 ? 0 : static_cast<int>(state.python_sources.size()) - 1;
+    if (!state.python_sources.empty() && default_python_index >= 0) {
+        SendMessageW(state.python_source_combo, CB_SETCURSEL, default_python_index, 0);
+    }
+    if (!state.script_options.empty()) {
+        SendMessageW(state.script_combo, CB_SETCURSEL, 0, 0);
+        CheckRadioButton(hwnd, kControlLaunchScript, kControlLaunchCustom, kControlLaunchScript);
+    } else {
+        CheckRadioButton(hwnd, kControlLaunchScript, kControlLaunchCustom, kControlLaunchCustom);
+    }
+    CheckRadioButton(hwnd, kControlEnvironmentDirect, kControlEnvironmentNamed, kControlEnvironmentNamed);
+
+    switch (startup.recommended.kind) {
+    case AcceleratorKind::NvidiaCuda:
+        CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchCuda);
+        break;
+    case AcceleratorKind::AmdRocm:
+        CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchRocm);
+        break;
+    case AcceleratorKind::IntelArcXpu:
+        CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchXpu);
+        break;
+    case AcceleratorKind::Cpu:
+        CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchCpu);
+        break;
+    }
+    SetWindowTextW(state.torch_note, startup.recommended.note.c_str());
+    SetWindowTextW(state.environment_name_edit, default_environment_name(state.layout).c_str());
+    update_setup_controls(hwnd);
+}
+
 void start_launcher_run(HWND hwnd, const RunConfig& run_config, bool confirm_direct_install) {
     auto* state = reinterpret_cast<WindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (!state || state->run_started) {
@@ -3030,6 +3110,52 @@ void start_launcher_run(HWND hwnd, const RunConfig& run_config, bool confirm_dir
 
     std::thread worker([context]() mutable { bootstrap_worker(std::move(context)); });
     worker.detach();
+}
+
+void startup_worker(StartupContext context) {
+    try {
+        append_log_line(context.layout.log_file, L"Launcher executable: " + executable_path().wstring());
+        append_log_line(context.layout.log_file, L"Project root: " + context.layout.project_root.wstring());
+
+        StartupResult result{};
+        result.conda_executable = find_conda_executable().value_or(fs::path());
+        result.conda_available = !result.conda_executable.empty();
+        if (result.conda_available) {
+            append_log_line(context.layout.log_file, L"Conda detected at " + result.conda_executable.wstring());
+        } else {
+            append_log_line(context.layout.log_file, L"Conda was not detected.");
+        }
+
+        if (path_exists_no_throw(context.layout.requirements_file)) {
+            append_log_line(context.layout.log_file, L"Using requirements file: " + context.layout.requirements_file.wstring());
+        } else {
+            append_log_line(context.layout.log_file, L"No requirements.txt was found next to launch.exe.");
+        }
+
+        result.python_sources = discover_python_sources(context.config, context.layout);
+        result.script_options = discover_script_options(context.layout);
+        append_log_line(
+            context.layout.log_file,
+            L"Discovered " + wide_from_utf8(std::to_string(result.python_sources.size())) + L" Python source option(s)."
+        );
+        for (const auto& source : result.python_sources) {
+            append_log_line(context.layout.log_file, L"Python source option: " + source.label);
+        }
+
+        result.recommended = detect_accelerator(context.config, context.layout);
+
+        try {
+            result.saved_config = load_run_config(context.layout);
+        } catch (const std::exception& exc) {
+            append_log_line(context.layout.log_file, L"Could not read run.cfg: " + wide_from_utf8(exc.what()));
+        }
+
+        PostMessageW(context.hwnd, WMU_INIT_READY, 0, reinterpret_cast<LPARAM>(new StartupResult(std::move(result))));
+    } catch (const std::exception& exc) {
+        auto* payload = new UiMessage{};
+        payload->text = wide_from_utf8(exc.what());
+        PostMessageW(context.hwnd, WMU_INIT_ERROR, 0, reinterpret_cast<LPARAM>(payload));
+    }
 }
 
 void bootstrap_worker(WorkerContext context) {
@@ -3200,6 +3326,46 @@ void append_log_to_edit(HWND edit_control, const std::wstring& text) {
     std::wstring line = text + L"\r\n";
     SendMessageW(edit_control, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(line.c_str()));
     SendMessageW(edit_control, EM_SCROLLCARET, 0, 0);
+}
+
+LRESULT CALLBACK splash_window_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param) {
+    auto* state = reinterpret_cast<SplashState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_CREATE: {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(l_param);
+        auto* new_state = reinterpret_cast<SplashState*>(create->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(new_state));
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        HDC hdc = BeginPaint(hwnd, &paint);
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        FillRect(hdc, &client, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        if (state && state->image) {
+            Gdiplus::Graphics graphics(hdc);
+            graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+            graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+            graphics.DrawImage(
+                state->image.get(),
+                Gdiplus::Rect(0, 0, client.right - client.left, client.bottom - client.top)
+            );
+        }
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
+    case WM_DESTROY:
+        delete state;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, message, w_param, l_param);
 }
 
 LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param) {
@@ -3566,6 +3732,21 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
         );
         return 0;
     }
+    case WM_SIZE:
+        if (state && state->splash_hwnd) {
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            SetWindowPos(
+                state->splash_hwnd,
+                HWND_TOP,
+                0,
+                0,
+                client.right - client.left,
+                client.bottom - client.top,
+                SWP_NOACTIVATE
+            );
+        }
+        break;
     case WM_COMMAND:
         if (!state) {
             break;
@@ -3617,9 +3798,53 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        if (state && state->splash_hwnd) {
+            DestroyWindow(state->splash_hwnd);
+            state->splash_hwnd = nullptr;
+        }
         delete state;
         PostQuitMessage(0);
         return 0;
+    case WMU_INIT_READY: {
+        std::unique_ptr<StartupResult> startup(reinterpret_cast<StartupResult*>(l_param));
+        if (!state || !startup) {
+            return 0;
+        }
+        populate_window_after_startup(hwnd, *state, *startup);
+        const bool use_saved_config =
+            state->saved_config.has_value() && run_config_is_usable(*state->saved_config, state->layout);
+        if (use_saved_config) {
+            start_launcher_run(hwnd, *state->saved_config, false);
+        } else {
+            set_window_mode(hwnd, true);
+            if (state->saved_config.has_value() && !run_config_is_usable(*state->saved_config, state->layout)) {
+                SetWindowTextW(
+                    state->setup_intro,
+                    L"The saved run.cfg could not be reused. Review the selections below, then save and launch again."
+                );
+            }
+        }
+        if (state->splash_hwnd) {
+            DestroyWindow(state->splash_hwnd);
+            state->splash_hwnd = nullptr;
+        }
+        return 0;
+    }
+    case WMU_INIT_ERROR: {
+        std::unique_ptr<UiMessage> payload(reinterpret_cast<UiMessage*>(l_param));
+        if (state && state->splash_hwnd) {
+            DestroyWindow(state->splash_hwnd);
+            state->splash_hwnd = nullptr;
+        }
+        MessageBoxW(
+            hwnd,
+            payload ? payload->text.c_str() : L"Unknown startup error.",
+            L"Launcher startup failed",
+            MB_OK | MB_ICONERROR
+        );
+        DestroyWindow(hwnd);
+        return 0;
+    }
     case WMU_STATUS:
     case WMU_LOG:
     case WMU_FAILED:
@@ -3659,7 +3884,63 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
     return DefWindowProcW(hwnd, message, w_param, l_param);
 }
 
-HWND create_launcher_window(HINSTANCE instance, const fs::path& log_file) {
+HWND create_splash_overlay(HINSTANCE instance, HWND parent, const fs::path& image_file) {
+    if (!path_exists_no_throw(image_file)) {
+        return nullptr;
+    }
+
+    auto image = std::make_unique<Gdiplus::Image>(image_file.c_str());
+    if (!image || image->GetLastStatus() != Gdiplus::Ok) {
+        return nullptr;
+    }
+
+    UINT image_width = image->GetWidth();
+    UINT image_height = image->GetHeight();
+    if (image_width == 0 || image_height == 0) {
+        return nullptr;
+    }
+
+    WNDCLASSEXW splash_class{};
+    splash_class.cbSize = sizeof(splash_class);
+    splash_class.lpfnWndProc = splash_window_proc;
+    splash_class.hInstance = instance;
+    splash_class.lpszClassName = kSplashWindowClassName;
+    splash_class.hCursor = LoadCursorW(nullptr, IDC_WAIT);
+    splash_class.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+    RegisterClassExW(&splash_class);
+
+    RECT client{};
+    GetClientRect(parent, &client);
+    const int window_width = std::max(1L, static_cast<long>(client.right - client.left));
+    const int window_height = std::max(1L, static_cast<long>(client.bottom - client.top));
+
+    auto* splash_state = new SplashState{};
+    splash_state->image = std::move(image);
+
+    HWND hwnd = CreateWindowExW(
+        0,
+        kSplashWindowClassName,
+        L"Launcher Loading",
+        WS_CHILD | WS_VISIBLE,
+        0,
+        0,
+        window_width,
+        window_height,
+        parent,
+        nullptr,
+        instance,
+        splash_state
+    );
+    if (!hwnd) {
+        delete splash_state;
+        return nullptr;
+    }
+
+    SetWindowPos(hwnd, HWND_TOP, 0, 0, window_width, window_height, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    return hwnd;
+}
+
+HWND create_launcher_window(HINSTANCE instance, const fs::path& log_file, const fs::path& splash_image_file) {
     INITCOMMONCONTROLSEX controls{};
     controls.dwSize = sizeof(controls);
     controls.dwICC = ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS;
@@ -3690,14 +3971,16 @@ HWND create_launcher_window(HINSTANCE instance, const fs::path& log_file) {
     );
     fail_if(hwnd == nullptr, L"Could not create the launcher window: " + last_error_message(GetLastError()));
 
-    ShowWindow(hwnd, SW_SHOW);
-    UpdateWindow(hwnd);
-
     if (auto* window_state = reinterpret_cast<WindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA))) {
         window_state->log_file = log_file;
+        window_state->splash_image_file = splash_image_file;
         SetWindowTextW(window_state->detail_label, log_file.wstring().c_str());
-        set_window_mode(hwnd, true);
+        SetWindowTextW(window_state->status_label, L"Checking saved configuration...");
+        set_window_mode(hwnd, false);
+        window_state->splash_hwnd = create_splash_overlay(instance, hwnd, splash_image_file);
     }
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
     return hwnd;
 }
 
@@ -3718,103 +4001,42 @@ std::vector<std::wstring> parse_extra_arguments() {
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+    ULONG_PTR gdiplus_token = 0;
     try {
+        Gdiplus::GdiplusStartupInput gdiplus_startup_input;
+        Gdiplus::GdiplusStartup(&gdiplus_token, &gdiplus_startup_input, nullptr);
+
         LauncherConfig config{};
         ProjectLayout layout = resolve_project_layout(config);
-        const HWND hwnd = create_launcher_window(instance, layout.log_file);
+        const fs::path splash_image_file = layout.project_root / "src" / "splash.png";
+        const HWND hwnd = create_launcher_window(instance, layout.log_file, splash_image_file);
         auto* state = reinterpret_cast<WindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         fail_if(state == nullptr, L"Could not initialize the launcher window state.");
         state->config = config;
         state->layout = layout;
         state->extra_args = parse_extra_arguments();
-        state->conda_executable = find_conda_executable().value_or(fs::path());
-        state->conda_available = !state->conda_executable.empty();
+        state->splash_image_file = splash_image_file;
 
-        append_log_line(layout.log_file, L"Launcher executable: " + executable_path().wstring());
-        append_log_line(layout.log_file, L"Project root: " + layout.project_root.wstring());
-        if (state->conda_available) {
-            append_log_line(layout.log_file, L"Conda detected at " + state->conda_executable.wstring());
-        } else {
-            append_log_line(layout.log_file, L"Conda was not detected.");
-        }
-        if (fs::exists(layout.requirements_file)) {
-            append_log_line(layout.log_file, L"Using requirements file: " + layout.requirements_file.wstring());
-        } else {
-            append_log_line(layout.log_file, L"No requirements.txt was found next to launch.exe.");
-        }
-
-        state->python_sources = discover_python_sources(config, layout);
-        state->script_options = discover_script_options(layout);
-        append_log_line(
-            layout.log_file,
-            L"Discovered " + wide_from_utf8(std::to_string(state->python_sources.size())) + L" Python source option(s)."
-        );
-        for (const auto& source : state->python_sources) {
-            append_log_line(layout.log_file, L"Python source option: " + source.label);
-        }
-        for (const auto& source : state->python_sources) {
-            SendMessageW(state->python_source_combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(source.label.c_str()));
-        }
-        for (const auto& script : state->script_options) {
-            SendMessageW(state->script_combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(script.wstring().c_str()));
-        }
-
-        const int default_python_index = state->python_sources.size() > 2 ? 0 : static_cast<int>(state->python_sources.size()) - 1;
-        if (!state->python_sources.empty() && default_python_index >= 0) {
-            SendMessageW(state->python_source_combo, CB_SETCURSEL, default_python_index, 0);
-        }
-        if (!state->script_options.empty()) {
-            SendMessageW(state->script_combo, CB_SETCURSEL, 0, 0);
-            CheckRadioButton(hwnd, kControlLaunchScript, kControlLaunchCustom, kControlLaunchScript);
-        } else {
-            CheckRadioButton(hwnd, kControlLaunchScript, kControlLaunchCustom, kControlLaunchCustom);
-        }
-        CheckRadioButton(hwnd, kControlEnvironmentDirect, kControlEnvironmentNamed, kControlEnvironmentNamed);
-
-        const AcceleratorChoice recommended = detect_accelerator(config, layout);
-        switch (recommended.kind) {
-        case AcceleratorKind::NvidiaCuda:
-            CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchCuda);
-            break;
-        case AcceleratorKind::AmdRocm:
-            CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchRocm);
-            break;
-        case AcceleratorKind::IntelArcXpu:
-            CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchXpu);
-            break;
-        case AcceleratorKind::Cpu:
-            CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchCpu);
-            break;
-        }
-        SetWindowTextW(state->torch_note, recommended.note.c_str());
-        SetWindowTextW(state->environment_name_edit, default_environment_name(layout).c_str());
-        update_setup_controls(hwnd);
-
-        try {
-            state->saved_config = load_run_config(layout);
-        } catch (const std::exception& exc) {
-            append_log_line(layout.log_file, L"Could not read run.cfg: " + wide_from_utf8(exc.what()));
-            state->saved_config.reset();
-        }
-
-        if (state->saved_config.has_value()) {
-            if (run_config_is_usable(*state->saved_config, layout)) {
-                start_launcher_run(hwnd, *state->saved_config, false);
-            } else {
-                SetWindowTextW(
-                    state->setup_intro,
-                    L"The saved run.cfg could not be reused. Review the selections below, then save and launch again."
-                );
-            }
-        }
+        StartupContext startup{};
+        startup.config = config;
+        startup.layout = layout;
+        startup.hwnd = hwnd;
+        std::thread worker([startup]() mutable { startup_worker(std::move(startup)); });
+        worker.detach();
 
         MSG message{};
         while (GetMessageW(&message, nullptr, 0, 0) > 0) {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+        if (gdiplus_token != 0) {
+            Gdiplus::GdiplusShutdown(gdiplus_token);
+        }
         return 0;
     } catch (const std::exception& exc) {
+        if (gdiplus_token != 0) {
+            Gdiplus::GdiplusShutdown(gdiplus_token);
+        }
         MessageBoxW(
             nullptr,
             wide_from_utf8(exc.what()).c_str(),

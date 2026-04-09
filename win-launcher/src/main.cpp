@@ -34,9 +34,43 @@
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "Advapi32.lib")
 
+#define IDI_ICON1 101
+
 namespace fs = std::filesystem;
 
+HFONT g_hFont = nullptr;
+
 namespace {
+
+HFONT create_ui_font() {
+    return CreateFontW(
+        9,
+        0,
+        0,
+        0,
+        FW_NORMAL,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe UI"
+    );
+}
+
+constexpr DWORD kBgColor = 0x1E1E1E;
+constexpr DWORD kTextColor = 0xE0E0E0;
+constexpr DWORD kAccentColor = 0x00FF00;
+constexpr DWORD kButtonBgColor = 0x2D2D2D;
+constexpr DWORD kEditBgColor = 0x2D2D2D;
+
+HBRUSH g_hBgBrush = nullptr;
+HBRUSH g_hEditBrush = nullptr;
+HBRUSH g_hButtonBrush = nullptr;
+HPEN g_hAccentPen = nullptr;
 
 constexpr UINT WMU_STATUS = WM_APP + 1;
 constexpr UINT WMU_LOG = WM_APP + 2;
@@ -57,6 +91,9 @@ constexpr int kControlTorchCuda = 120;
 constexpr int kControlTorchRocm = 121;
 constexpr int kControlTorchXpu = 122;
 constexpr int kControlTorchCpu = 123;
+constexpr int kControlCondaSuggest = 130;
+constexpr int kControlCondaInstall = 131;
+constexpr int kControlLaunchInTerminal = 132;
 constexpr int kControlLaunchScript = 140;
 constexpr int kControlScriptCombo = 141;
 constexpr int kControlLaunchCustom = 142;
@@ -73,6 +110,7 @@ struct LauncherConfig {
     std::wstring python_windows_release_url = L"https://www.python.org/getit/windows/";
     std::wstring python_installer_url_template = L"https://www.python.org/ftp/python/{version}/python-{version}-amd64.exe";
     std::wstring python_embeddable_url_template = L"https://www.python.org/ftp/python/{version}/python-{version}-embed-amd64.zip";
+    std::wstring miniconda_installer_url = L"https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe";
     std::wstring runtime_dir_name = L"runtime";
     std::wstring python_base_dir_name = L"python-base";
     std::wstring python_env_dir_name = L"python";
@@ -107,6 +145,7 @@ struct ProjectLayout {
     fs::path python_installer_file;
     fs::path python_embeddable_file;
     fs::path python_installer_log_file;
+    fs::path miniconda_installer_file;
     fs::path requirements_file;
     fs::path run_config_file;
     fs::path envs_dir;
@@ -179,6 +218,7 @@ struct RunConfig {
     AcceleratorKind accelerator_kind = AcceleratorKind::Cpu;
     LaunchKind launch_kind = LaunchKind::Script;
     std::wstring launch_target;
+    bool launch_in_terminal = true;
     std::wstring requirements_hash;
     std::wstring requirements_synced_at;
 };
@@ -188,6 +228,8 @@ struct WindowState {
     HWND python_source_label = nullptr;
     HWND python_source_combo = nullptr;
     HWND python_source_note = nullptr;
+    HWND conda_suggest_label = nullptr;
+    HWND conda_install_button = nullptr;
     HWND environment_direct_radio = nullptr;
     HWND environment_named_radio = nullptr;
     HWND environment_name_label = nullptr;
@@ -202,6 +244,7 @@ struct WindowState {
     HWND script_combo = nullptr;
     HWND launch_custom_radio = nullptr;
     HWND custom_command_edit = nullptr;
+    HWND launch_in_terminal_check = nullptr;
     HWND launch_note = nullptr;
     HWND start_button = nullptr;
     HWND status_label = nullptr;
@@ -1848,6 +1891,48 @@ std::vector<std::wstring> enumerate_display_adapter_names() {
     return names;
 }
 
+struct AcceleratorAvailability {
+    bool cuda = false;
+    bool rocm = false;
+    bool xpu = false;
+    bool cpu = true;
+};
+
+AcceleratorAvailability check_accelerator_availability() {
+    AcceleratorAvailability avail;
+    const auto adapter_names = enumerate_display_adapter_names();
+
+    avail.cuda = std::any_of(
+        adapter_names.begin(),
+        adapter_names.end(),
+        [](const std::wstring& name) { return contains_case_insensitive(name, L"nvidia"); }
+    ) || command_exists_on_path(L"nvidia-smi.exe")
+    || fs::exists(LR"(C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe)");
+
+    avail.xpu = std::any_of(
+        adapter_names.begin(),
+        adapter_names.end(),
+        [](const std::wstring& name) {
+            return contains_case_insensitive(name, L"intel") && contains_case_insensitive(name, L"arc");
+        }
+    );
+
+    avail.rocm = std::any_of(
+        adapter_names.begin(),
+        adapter_names.end(),
+        [](const std::wstring& name) {
+            return contains_case_insensitive(name, L"amd") || contains_case_insensitive(name, L"radeon");
+        }
+    ) && (env_value(L"ROCM_PATH").has_value()
+        || env_value(L"HIP_PATH").has_value()
+        || command_exists_on_path(L"rocminfo.exe")
+        || command_exists_on_path(L"hipinfo.exe")
+        || fs::exists(LR"(C:\Program Files\AMD\ROCm)")
+        || fs::exists(LR"(C:\Program Files\AMD\HIP)"));
+
+    return avail;
+}
+
 bool contains_case_insensitive(const std::wstring& text, const std::wstring& needle) {
     return lower_copy(text).find(lower_copy(needle)) != std::wstring::npos;
 }
@@ -2777,7 +2862,10 @@ void launch_selected_target(const ProjectLayout& layout, const RunConfig& run_co
     }
     arguments.insert(arguments.end(), extra_args.begin(), extra_args.end());
 
-    const fs::path preferred_python = fs::exists(layout.active_pythonw_exe) ? layout.active_pythonw_exe : layout.active_python_exe;
+    const bool use_terminal = run_config.launch_in_terminal;
+    const fs::path preferred_python = use_terminal
+        ? layout.active_python_exe
+        : (fs::exists(layout.active_pythonw_exe) ? layout.active_pythonw_exe : layout.active_python_exe);
     fail_if(preferred_python.empty(), L"The selected Python environment is not ready.");
     append_log_line(
         layout.log_file,
@@ -2785,8 +2873,14 @@ void launch_selected_target(const ProjectLayout& layout, const RunConfig& run_co
         + (run_config.launch_kind == LaunchKind::Script ? run_config.launch_target : run_config.launch_target)
         + L" with "
         + preferred_python.wstring()
+        + (use_terminal ? L" (terminal)" : L" (hidden)")
     );
-    start_detached_process(preferred_python, arguments, layout.project_root, true);
+
+    if (use_terminal) {
+        start_detached_process(preferred_python, arguments, layout.project_root, false);
+    } else {
+        start_detached_process(preferred_python, arguments, layout.project_root, true);
+    }
 }
 
 ProjectLayout resolve_project_layout(const LauncherConfig& config) {
@@ -2813,6 +2907,7 @@ ProjectLayout resolve_project_layout(const LauncherConfig& config) {
     layout.python_installer_file = layout.cache_dir / "python-runtime-installer.exe";
     layout.python_embeddable_file = layout.cache_dir / "python-runtime-embed.zip";
     layout.python_installer_log_file = layout.logs_dir / "python-installer.log";
+    layout.miniconda_installer_file = layout.cache_dir / "miniconda-installer.exe";
     layout.requirements_file = layout.project_root / "requirements.txt";
     layout.run_config_file = layout.project_root / "run.cfg";
     layout.envs_dir = layout.runtime_dir / "envs";
@@ -2899,12 +2994,17 @@ RunConfig collect_run_config_from_controls(HWND hwnd, const WindowState& state) 
         run_config.launch_target = state.script_options[static_cast<size_t>(script_index)].wstring();
     }
 
+    run_config.launch_in_terminal = (IsDlgButtonChecked(hwnd, kControlLaunchInTerminal) == BST_CHECKED);
+
     return run_config;
 }
 
 void update_setup_controls(HWND hwnd) {
     auto* state = reinterpret_cast<WindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (!state) {
+        return;
+    }
+    if (!state->setup_mode) {
         return;
     }
 
@@ -2987,6 +3087,8 @@ void set_window_mode(HWND hwnd, bool setup_mode) {
         state->python_source_label,
         state->python_source_combo,
         state->python_source_note,
+        state->conda_suggest_label,
+        state->conda_install_button,
         state->environment_direct_radio,
         state->environment_named_radio,
         state->environment_name_label,
@@ -3001,6 +3103,7 @@ void set_window_mode(HWND hwnd, bool setup_mode) {
         state->script_combo,
         state->launch_custom_radio,
         state->custom_command_edit,
+        state->launch_in_terminal_check,
         state->launch_note,
         state->start_button
     };
@@ -3051,23 +3154,42 @@ void populate_window_after_startup(HWND hwnd, WindowState& state, const StartupR
     } else {
         CheckRadioButton(hwnd, kControlLaunchScript, kControlLaunchCustom, kControlLaunchCustom);
     }
+    CheckDlgButton(hwnd, kControlLaunchInTerminal, BST_CHECKED);
+
     CheckRadioButton(hwnd, kControlEnvironmentDirect, kControlEnvironmentNamed, kControlEnvironmentNamed);
 
-    switch (startup.recommended.kind) {
-    case AcceleratorKind::NvidiaCuda:
-        CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchCuda);
-        break;
-    case AcceleratorKind::AmdRocm:
-        CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchRocm);
-        break;
-    case AcceleratorKind::IntelArcXpu:
-        CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchXpu);
-        break;
-    case AcceleratorKind::Cpu:
-        CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchCpu);
-        break;
+    const AcceleratorAvailability avail = check_accelerator_availability();
+    ShowWindow(state.torch_cuda_radio, avail.cuda ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.torch_rocm_radio, avail.rocm ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.torch_xpu_radio, avail.xpu ? SW_SHOW : SW_HIDE);
+
+    CheckRadioButton(hwnd, kControlTorchCuda, kControlTorchCpu, kControlTorchCpu);
+
+    std::wstring torch_note_text = L"CPU selected by default. ";
+    if (avail.cuda) {
+        torch_note_text += L"CUDA was detected. ";
     }
-    SetWindowTextW(state.torch_note, startup.recommended.note.c_str());
+    if (avail.xpu) {
+        torch_note_text += L"Intel XPU was detected. ";
+    }
+    if (avail.rocm) {
+        torch_note_text += L"ROCm was detected. ";
+    }
+    torch_note_text += L"Your torch choice overrides any torch, torchvision, or torchaudio pins in requirements.txt.";
+    SetWindowTextW(state.torch_note, torch_note_text.c_str());
+
+    if (!state.conda_available) {
+        SetWindowTextW(state.conda_suggest_label,
+            L"Miniconda3 is recommended for managing Python environments. https://docs.anaconda.com/miniconda/");
+        EnableWindow(state.conda_install_button, TRUE);
+        SetWindowTextW(state.conda_install_button, L"Install Miniconda");
+    } else {
+        SetWindowTextW(state.conda_suggest_label,
+            L"Miniconda is installed and available for managing Python environments.");
+        EnableWindow(state.conda_install_button, FALSE);
+        SetWindowTextW(state.conda_install_button, L"Install Miniconda");
+    }
+
     SetWindowTextW(state.environment_name_edit, default_environment_name(state.layout).c_str());
     update_setup_controls(hwnd);
 }
@@ -3344,7 +3466,7 @@ LRESULT CALLBACK splash_window_proc(HWND hwnd, UINT message, WPARAM w_param, LPA
         HDC hdc = BeginPaint(hwnd, &paint);
         RECT client{};
         GetClientRect(hwnd, &client);
-        FillRect(hdc, &client, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        FillRect(hdc, &client, g_hBgBrush);
         if (state && state->image) {
             Gdiplus::Graphics graphics(hdc);
             graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
@@ -3372,6 +3494,24 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
     auto* state = reinterpret_cast<WindowState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
     switch (message) {
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = reinterpret_cast<HDC>(w_param);
+        SetBkColor(hdc, kBgColor);
+        SetTextColor(hdc, kTextColor);
+        return reinterpret_cast<LRESULT>(g_hBgBrush);
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC hdc = reinterpret_cast<HDC>(w_param);
+        SetBkColor(hdc, kEditBgColor);
+        SetTextColor(hdc, kTextColor);
+        return reinterpret_cast<LRESULT>(g_hEditBrush);
+    }
+    case WM_CTLCOLORBTN: {
+        HDC hdc = reinterpret_cast<HDC>(w_param);
+        SetBkColor(hdc, kButtonBgColor);
+        SetTextColor(hdc, kTextColor);
+        return reinterpret_cast<LRESULT>(g_hButtonBrush);
+    }
     case WM_CREATE: {
         auto* new_state = new WindowState();
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(new_state));
@@ -3383,8 +3523,8 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             L"Choose the Python environment, torch variant, and launch target for this folder. The launcher will remember everything in run.cfg after the first successful setup.",
             WS_CHILD | WS_VISIBLE,
             18,
-            18,
-            780,
+            15,
+            814,
             36,
             hwnd,
             nullptr,
@@ -3397,7 +3537,7 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             L"Python 3.12.x source",
             WS_CHILD | WS_VISIBLE,
             18,
-            70,
+            56,
             220,
             18,
             hwnd,
@@ -3411,9 +3551,9 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             nullptr,
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
             18,
-            92,
-            780,
-            220,
+            78,
+            814,
+            150,
             hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlPythonSourceCombo)),
             nullptr,
@@ -3425,11 +3565,39 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             nullptr,
             WS_CHILD | WS_VISIBLE,
             18,
-            126,
-            780,
-            44,
+            108,
+            814,
+            36,
             hwnd,
             nullptr,
+            nullptr,
+            nullptr
+        );
+        state->conda_suggest_label = CreateWindowExW(
+            0,
+            WC_STATICW,
+            nullptr,
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
+            18,
+            148,
+            620,
+            20,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlCondaSuggest)),
+            nullptr,
+            nullptr
+        );
+        state->conda_install_button = CreateWindowExW(
+            0,
+            WC_BUTTONW,
+            L"Install Miniconda",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            648,
+            146,
+            180,
+            24,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlCondaInstall)),
             nullptr,
             nullptr
         );
@@ -3439,7 +3607,7 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             L"Use the selected Python directly",
             WS_CHILD | WS_VISIBLE | WS_GROUP | WS_TABSTOP | BS_AUTORADIOBUTTON,
             18,
-            176,
+            180,
             300,
             20,
             hwnd,
@@ -3453,7 +3621,7 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             L"Create a named project environment (recommended)",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
             18,
-            204,
+            205,
             360,
             20,
             hwnd,
@@ -3467,7 +3635,7 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             L"Environment name",
             WS_CHILD | WS_VISIBLE,
             42,
-            234,
+            236,
             120,
             18,
             hwnd,
@@ -3481,7 +3649,7 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             nullptr,
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
             170,
-            230,
+            232,
             250,
             24,
             hwnd,
@@ -3510,7 +3678,7 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             WS_CHILD | WS_VISIBLE | WS_GROUP | WS_TABSTOP | BS_AUTORADIOBUTTON,
             18,
             294,
-            120,
+            80,
             20,
             hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlTorchCuda)),
@@ -3522,9 +3690,9 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             WC_BUTTONW,
             L"ROCm",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-            160,
+            108,
             294,
-            120,
+            80,
             20,
             hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlTorchRocm)),
@@ -3534,11 +3702,11 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
         state->torch_xpu_radio = CreateWindowExW(
             0,
             WC_BUTTONW,
-            L"Intel XPU",
+            L"XPU",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-            300,
+            198,
             294,
-            140,
+            80,
             20,
             hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlTorchXpu)),
@@ -3550,9 +3718,9 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             WC_BUTTONW,
             L"CPU",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-            460,
+            288,
             294,
-            120,
+            80,
             20,
             hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlTorchCpu)),
@@ -3562,11 +3730,11 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
         state->torch_note = CreateWindowExW(
             0,
             WC_STATICW,
-            L"Your torch choice overrides any torch, torchvision, or torchaudio pins in requirements.txt.",
+            L"",
             WS_CHILD | WS_VISIBLE,
             18,
-            322,
-            780,
+            320,
+            814,
             28,
             hwnd,
             nullptr,
@@ -3579,7 +3747,7 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             L"Run a Python script from this folder",
             WS_CHILD | WS_VISIBLE | WS_GROUP | WS_TABSTOP | BS_AUTORADIOBUTTON,
             18,
-            366,
+            358,
             320,
             20,
             hwnd,
@@ -3593,9 +3761,9 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             nullptr,
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
             42,
-            392,
-            756,
-            220,
+            383,
+            790,
+            120,
             hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlScriptCombo)),
             nullptr,
@@ -3607,7 +3775,7 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             L"Run a custom Python command or module",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
             18,
-            426,
+            418,
             340,
             20,
             hwnd,
@@ -3621,8 +3789,8 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             nullptr,
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
             42,
-            452,
-            756,
+            443,
+            790,
             24,
             hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlCustomCommandEdit)),
@@ -3635,11 +3803,25 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             L"Examples: -m mypackage, tool.py --flag, or -m uvicorn app:app --reload",
             WS_CHILD | WS_VISIBLE,
             18,
-            484,
-            780,
+            475,
+            814,
             18,
             hwnd,
             nullptr,
+            nullptr,
+            nullptr
+        );
+        state->launch_in_terminal_check = CreateWindowExW(
+            0,
+            WC_BUTTONW,
+            L"Launch in terminal (recommended for scripts without GUI)",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            18,
+            496,
+            400,
+            20,
+            hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlLaunchInTerminal)),
             nullptr,
             nullptr
         );
@@ -3649,7 +3831,7 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             L"Save && Launch",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
             590,
-            518,
+            510,
             110,
             30,
             hwnd,
@@ -3663,7 +3845,7 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             L"Close",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             708,
-            518,
+            510,
             90,
             30,
             hwnd,
@@ -3678,8 +3860,8 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             L"Preparing launcher...",
             WS_CHILD,
             18,
-            18,
-            780,
+            560,
+            814,
             26,
             hwnd,
             nullptr,
@@ -3692,8 +3874,8 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             nullptr,
             WS_CHILD,
             18,
-            54,
-            780,
+            592,
+            814,
             22,
             hwnd,
             nullptr,
@@ -3708,8 +3890,8 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             L"Logs will appear below.",
             WS_CHILD,
             18,
-            84,
-            780,
+            620,
+            814,
             18,
             hwnd,
             nullptr,
@@ -3722,9 +3904,9 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
             nullptr,
             WS_CHILD | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
             18,
-            112,
-            780,
-            390,
+            645,
+            814,
+            30,
             hwnd,
             nullptr,
             nullptr,
@@ -3784,6 +3966,66 @@ LRESULT CALLBACK launcher_window_proc(HWND hwnd, UINT message, WPARAM w_param, L
         case kControlLaunchCustom:
             if (HIWORD(w_param) == BN_CLICKED) {
                 update_setup_controls(hwnd);
+            }
+            return 0;
+        case kControlCondaSuggest:
+            if (HIWORD(w_param) == STN_CLICKED || HIWORD(w_param) == BN_CLICKED) {
+                ShellExecuteW(nullptr, L"open", L"https://docs.anaconda.com/miniconda/", nullptr, nullptr, SW_SHOWNORMAL);
+            }
+            return 0;
+        case kControlCondaInstall:
+            if (HIWORD(w_param) == BN_CLICKED) {
+                SetWindowTextW(state->conda_install_button, L"Installing...");
+                EnableWindow(state->conda_install_button, FALSE);
+                std::thread worker([hwnd, state]() {
+                    try {
+                        append_log_line(state->layout.log_file, L"Starting Miniconda installation...");
+                        post_log(hwnd, L"Downloading Miniconda installer...");
+                        download_file(state->config.miniconda_installer_url, state->layout.miniconda_installer_file, state->layout.log_file);
+                        post_log(hwnd, L"Running Miniconda installer...");
+                        append_log_line(state->layout.log_file, L"Installing Miniconda silently...");
+                        const int exit_code = run_process(
+                            state->layout.miniconda_installer_file,
+                            {
+                                L"/quiet",
+                                L"/InstallationType=JustMe",
+                                L"/RegisterPython=0",
+                                L"/S",
+                                L"/D=" + (state->layout.project_root / L"miniconda3").wstring()
+                            },
+                            std::nullopt,
+                            state->layout.log_file,
+                            true
+                        );
+                        if (exit_code == 0 || exit_code == 3010) {
+                            append_log_line(state->layout.log_file, L"Miniconda installation completed.");
+                            post_log(hwnd, L"Miniconda installed successfully.");
+                            const auto conda_exe = find_conda_executable();
+                            if (conda_exe.has_value()) {
+                                state->conda_executable = *conda_exe;
+                                state->conda_available = true;
+                                SetWindowTextW(state->conda_suggest_label, L"Miniconda installed successfully and available.");
+                                EnableWindow(state->conda_install_button, FALSE);
+                            } else {
+                                SetWindowTextW(state->conda_suggest_label, L"Miniconda installed but not found. Please restart the launcher.");
+                                EnableWindow(state->conda_install_button, TRUE);
+                                SetWindowTextW(state->conda_install_button, L"Retry");
+                            }
+                        } else {
+                            append_log_line(state->layout.log_file, L"Miniconda installation failed with exit code " + wide_from_utf8(std::to_string(exit_code)));
+                            post_log(hwnd, L"Miniconda installation failed. Check the log for details.");
+                            SetWindowTextW(state->conda_suggest_label, L"Miniconda installation failed. Check the log.");
+                            EnableWindow(state->conda_install_button, TRUE);
+                            SetWindowTextW(state->conda_install_button, L"Retry");
+                        }
+                    } catch (const std::exception& exc) {
+                        append_log_line(state->layout.log_file, L"Miniconda installation error: " + wide_from_utf8(exc.what()));
+                        post_log(hwnd, L"Miniconda installation error: " + wide_from_utf8(exc.what()));
+                        EnableWindow(state->conda_install_button, TRUE);
+                        SetWindowTextW(state->conda_install_button, L"Retry");
+                    }
+                });
+                worker.detach();
             }
             return 0;
         default:
@@ -3906,13 +4148,13 @@ HWND create_splash_overlay(HINSTANCE instance, HWND parent, const fs::path& imag
     splash_class.hInstance = instance;
     splash_class.lpszClassName = kSplashWindowClassName;
     splash_class.hCursor = LoadCursorW(nullptr, IDC_WAIT);
-    splash_class.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+    splash_class.hbrBackground = g_hBgBrush;
+    splash_class.hIcon = LoadIconW(instance, MAKEINTRESOURCE(IDI_ICON1));
+    splash_class.hIconSm = LoadIconW(instance, MAKEINTRESOURCE(IDI_ICON1));
     RegisterClassExW(&splash_class);
 
     RECT client{};
     GetClientRect(parent, &client);
-    const int window_width = std::max(1L, static_cast<long>(client.right - client.left));
-    const int window_height = std::max(1L, static_cast<long>(client.bottom - client.top));
 
     auto* splash_state = new SplashState{};
     splash_state->image = std::move(image);
@@ -3924,8 +4166,8 @@ HWND create_splash_overlay(HINSTANCE instance, HWND parent, const fs::path& imag
         WS_CHILD | WS_VISIBLE,
         0,
         0,
-        window_width,
-        window_height,
+        client.right - client.left,
+        client.bottom - client.top,
         parent,
         nullptr,
         instance,
@@ -3936,7 +4178,7 @@ HWND create_splash_overlay(HINSTANCE instance, HWND parent, const fs::path& imag
         return nullptr;
     }
 
-    SetWindowPos(hwnd, HWND_TOP, 0, 0, window_width, window_height, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    SetWindowPos(hwnd, HWND_TOP, 0, 0, client.right - client.left, client.bottom - client.top, SWP_SHOWWINDOW | SWP_NOACTIVATE);
     return hwnd;
 }
 
@@ -3952,18 +4194,20 @@ HWND create_launcher_window(HINSTANCE instance, const fs::path& log_file, const 
     window_class.hInstance = instance;
     window_class.lpszClassName = kWindowClassName;
     window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    window_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    window_class.hbrBackground = g_hBgBrush;
+    window_class.hIcon = LoadIconW(instance, MAKEINTRESOURCE(IDI_ICON1));
+    window_class.hIconSm = LoadIconW(instance, MAKEINTRESOURCE(IDI_ICON1));
     RegisterClassExW(&window_class);
 
     HWND hwnd = CreateWindowExW(
-        0,
+        WS_EX_COMPOSITED,
         kWindowClassName,
         L"Python Launch Helper",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        836,
-        620,
+        850,
+        680,
         nullptr,
         nullptr,
         instance,
@@ -4005,6 +4249,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     try {
         Gdiplus::GdiplusStartupInput gdiplus_startup_input;
         Gdiplus::GdiplusStartup(&gdiplus_token, &gdiplus_startup_input, nullptr);
+
+        g_hFont = create_ui_font();
+        g_hBgBrush = CreateSolidBrush(kBgColor);
+        g_hEditBrush = CreateSolidBrush(kEditBgColor);
+        g_hButtonBrush = CreateSolidBrush(kButtonBgColor);
+        g_hAccentPen = CreatePen(PS_SOLID, 1, kAccentColor);
 
         LauncherConfig config{};
         ProjectLayout layout = resolve_project_layout(config);

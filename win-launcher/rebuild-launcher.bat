@@ -23,8 +23,10 @@ call "!VSINSTALL!\VC\Auxiliary\Build\vcvars64.bat"
 if errorlevel 1 exit /b 1
 
 pushd "!SCRIPT_DIR!"
+rc /r src\resources.rc
 cl /std:c++20 /EHsc /nologo /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /utf-8 ^
     src\main.cpp ^
+    src\resources.res ^
     /Fe:launch.exe ^
     /link comctl32.lib urlmon.lib user32.lib shell32.lib
 set "BUILD_EXIT=!ERRORLEVEL!"

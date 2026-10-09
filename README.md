@@ -1,16 +1,23 @@
-# Presentation Tools
+# ML Presentation Demos
 
-This folder contains several presentation-friendly Python GUIs and demos for reinforcement learning, CNN visualization, and Ultralytics YOLO26 inference.
+Hands-on machine learning demos built for a live AI presentation ([slides, PDF](Presentations/AI_Presentation_2026_04_08.pdf)). Each one is a desktop GUI that makes a model's behaviour visible while it runs:
 
-## If you are new to Python then here is a quick way around.
+| Demo | What it shows |
+| --- | --- |
+| [Rocket Landing Lab](https://github.com/jeffvan302/ml_rocket_lander) | A PPO agent learning to land a rocket, with live training curves and network activations |
+| [Car Driver Lab](https://github.com/jeffvan302/ml-car-driver) | A PPO agent learning to drive procedurally generated roads from lidar-style sensors |
+| MNIST CNN Visualizer | Train a configurable CNN on handwritten digits and watch its kernels, feature maps and activations |
+| Ultralytics YOLO26 Video GUI | YOLO26 detection, segmentation, pose and classification on video or a live camera |
 
-The launch.exe will setup a runtime folder and download and configure the stand alone version of python. Then it will run a launcher that will allow running the 4 examples.
-The first time will take a bit of time, since it is a setup effectively.  But it runs independently so no conflict issues.  
-Subsequent runs will just run the launcher while the runtime folder exists. The launcher now downloads [jeffvan302/ml_rocket_lander](https://github.com/jeffvan302/ml_rocket_lander) and [jeffvan302/ml-car-driver](https://github.com/jeffvan302/ml-car-driver) into the `external` folder the first time you open those demos, so this repo does not need to carry duplicate local copies.
+<p align="center"><img src="https://raw.githubusercontent.com/jeffvan302/ml_rocket_lander/main/docs/rocket_demo.gif" alt="Rocket Landing Lab demo" width="720" /></p>
 
-## Vibe Coding your own rocket game with learning ability
-You can see the Vibe Coding with project requirements at this repository: [https://github.com/jeffvan302/ml_rocket_lander](https://github.com/jeffvan302/ml_rocket_lander).
-If you provide the requirements document to a coding LLM then it should code a similar "game" trainer.
+## One-click start on Windows
+
+Run `launch.exe`. It is a small C++ launcher ([source](win-launcher/)) that downloads a standalone Python runtime into a local `runtime/` folder, installs the requirements there and opens a menu of the four demos, so nothing conflicts with Python already on your machine. The first run takes a few minutes; later runs open the menu straight away. The rocket and car demos are downloaded from their own repositories into `external/` the first time you open them.
+
+## Build your own with a coding LLM
+
+The rocket lander was built spec-first: its [project_requirements.md](https://github.com/jeffvan302/ml_rocket_lander/blob/main/project_requirements.md) is a complete specification. Hand it to a coding LLM and it should produce a comparable "game" trainer.
 
 ## Install Python With Miniconda
 
